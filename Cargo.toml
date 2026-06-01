@@ -1,0 +1,9 @@
+[package]
+name = "bob-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Bob command-line tools"
+
+[[bin]]
+name = "bob"
+path = "src/main.rs"

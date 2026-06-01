@@ -1,0 +1,20 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/bob_shell.sh
+source "${SCRIPT_DIR}/lib/bob_shell.sh"
+
+function run() {
+  local bob_pomodoro_output
+  if ! bob_pomodoro_output="$(bob_pomodoro)"; then
+    return 0
+  fi
+
+  if [[ -n "${bob_pomodoro_output}" ]]; then
+    printf "%s | " "${bob_pomodoro_output}"
+  fi
+}
+
+if [[ "${SCRIPTNAME}" == "$(basename "${BASH_SOURCE[0]}")" ]]; then
+  run "$@"
+fi
