@@ -3,7 +3,38 @@ name = "bob-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Bob command-line tools"
+default-run = "bob"
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/src/**",
+    "/scripts/**",
+]
+
+[dependencies]
+clap = "4.5"
 
 [[bin]]
 name = "bob"
 path = "src/main.rs"
+
+[[bin]]
+name = "bob_pomodoro"
+path = "src/bin/bob_pomodoro.rs"
+
+[[bin]]
+name = "bob_pomodoro_runtimes"
+path = "src/bin/bob_pomodoro_runtimes.rs"
+
+[[bin]]
+name = "bob_notify"
+path = "src/bin/bob_notify.rs"
+
+[[bin]]
+name = "bob_sync"
+path = "src/bin/bob_sync.rs"
+
+[[bin]]
+name = "tmux_bob_pomodoro"
+path = "src/bin/tmux_bob_pomodoro.rs"
