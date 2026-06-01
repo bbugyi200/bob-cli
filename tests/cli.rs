@@ -466,6 +466,49 @@ exit 64
     );
 }
 
+#[test]
+fn top_level_help_lists_commands_alphabetically_with_examples() {
+    let output = bob_command().arg("-h").output().expect("run bob -h");
+
+    assert_success(&output);
+    let help = stdout(&output);
+
+    let order = [
+        "notify",
+        "pomodoro",
+        "pomodoro-runtimes",
+        "sync",
+        "tmux-pomodoro",
+    ];
+    let mut last = 0;
+    for command in order {
+        let needle = format!("\n  {command} ");
+        let position = help.find(&needle).unwrap_or_else(|| {
+            panic!("expected command `{command}` in help:\n{help}")
+        });
+        assert!(
+            position >= last,
+            "command `{command}` is out of alphabetical order:\n{help}"
+        );
+        last = position;
+    }
+
+    assert!(
+        help.contains("Examples:")
+            && help.contains("bob pomodoro-runtimes --check"),
+        "expected an Examples section:\n{help}"
+    );
+    assert!(
+        help.contains("Run 'bob <command> --help' for more information"),
+        "expected a per-command help footer:\n{help}"
+    );
+
+    assert!(
+        !output.stdout.contains(&0x1b),
+        "piped help output must not contain ANSI escape codes:\n{help}"
+    );
+}
+
 fn bob_command() -> Command {
     Command::new(BOB_BIN)
 }

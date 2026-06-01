@@ -1,8 +1,9 @@
 # Bob CLI
 
 `bob-cli` installs the `bob` command and compatibility shims for the Bob Obsidian
-vault workflow. The command implementations are native Rust by default. The
-earlier Bash and Python implementations remain embedded as a rollback path:
+vault and Pomodoro workflow. The command implementations are native Rust by
+default. The earlier Bash and Python implementations remain embedded as a
+rollback path:
 set `BOB_CLI_USE_SCRIPT=1` to extract those scripts into `XDG_CACHE_HOME` and
 delegate to them.
 

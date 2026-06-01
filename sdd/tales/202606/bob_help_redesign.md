@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-01 11:24:14
-status: wip
+status: done
 prompt: sdd/prompts/202606/bob_help_redesign.md
 ---
 # Bob `-h` Help Redesign Plan

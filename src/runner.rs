@@ -7,40 +7,49 @@ use std::{
     process::{self, Command as ProcessCommand, ExitStatus, Stdio},
 };
 
-use clap::{builder::OsStringValueParser, Arg, Command as ClapCommand};
+use clap::{
+    builder::{
+        styling::{AnsiColor, Styles},
+        OsStringValueParser,
+    },
+    Arg, Command as ClapCommand,
+};
 
 use crate::native::{self, NativeCommand};
 use crate::scripts::{embedded_assets, script_by_command, EmbeddedAsset};
 
+// Keep this table sorted alphabetically by command name; the top-level help
+// renders subcommands in declaration order, and `subcommands_are_sorted` guards
+// the invariant.
 const SUBCOMMANDS: &[(&str, &str, &str, NativeCommand)] = &[
+    (
+        "notify",
+        "bob_notify",
+        "Notify when the current Pomodoro is complete",
+        NativeCommand::Notify,
+    ),
     (
         "pomodoro",
         "bob_pomodoro",
-        "Show the current Bob Pomodoro status",
+        "Show the current Pomodoro status",
         NativeCommand::Pomodoro,
     ),
     (
         "pomodoro-runtimes",
         "bob_pomodoro_runtimes",
-        "Annotate Bob Pomodoro ledger entries with runtimes",
+        "Annotate Pomodoro ledger entries with runtimes",
         NativeCommand::PomodoroRuntimes,
-    ),
-    (
-        "notify",
-        "bob_notify",
-        "Notify when the current Bob Pomodoro is complete",
-        NativeCommand::Notify,
     ),
     (
         "sync",
         "bob_sync",
-        "Sync the Bob Obsidian vault",
+        "Sync the Obsidian vault",
         NativeCommand::Sync,
     ),
     (
         "tmux-pomodoro",
         "tmux_bob_pomodoro",
-        "Print Bob Pomodoro status for tmux",
+        "Print Pomodoro status for tmux",
         NativeCommand::TmuxPomodoro,
     ),
 ];
@@ -154,10 +163,47 @@ pub fn materialize_scripts() -> Result<PathBuf, RunnerError> {
     Ok(script_dir)
 }
 
+const ABOUT: &str =
+    "Bob \u{2014} command-line tools for the Bob Obsidian vault and \
+     Pomodoro workflow";
+
+const LONG_ABOUT: &str =
+    "Bob \u{2014} command-line tools for the Bob Obsidian \
+vault and Pomodoro workflow.\n\n\
+Bob tracks a daily Pomodoro ledger inside an Obsidian vault and keeps that \
+vault synced through Git. Run a task with `bob <command>`; pass `--help` to a \
+command for its own options.";
+
+const HELP_TEMPLATE: &str = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}{after-help}";
+
+const AFTER_HELP: &str = "\
+Examples:
+  bob pomodoro                   Show today's Pomodoro status
+  bob sync                       Sync the Obsidian vault
+  bob pomodoro-runtimes --check  Preview ledger runtime updates (no writes)
+
+Run 'bob <command> --help' for more information on a command.";
+
+fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::Green.on_default().bold())
+        .usage(AnsiColor::Green.on_default().bold())
+        .literal(AnsiColor::Cyan.on_default().bold())
+        .placeholder(AnsiColor::Cyan.on_default())
+}
+
 fn build_cli() -> ClapCommand {
     let mut command = ClapCommand::new("bob")
         .version(env!("CARGO_PKG_VERSION"))
-        .about("Bob command-line tools")
+        .about(ABOUT)
+        .long_about(LONG_ABOUT)
+        .styles(cli_styles())
+        .help_template(HELP_TEMPLATE)
+        .after_help(AFTER_HELP)
         .subcommand_required(true)
         .arg_required_else_help(true);
 
@@ -368,4 +414,29 @@ fn set_asset_permissions(path: &Path, executable: bool) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_asset_permissions(_path: &Path, _executable: bool) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SUBCOMMANDS;
+
+    #[test]
+    fn subcommands_are_sorted_alphabetically() {
+        let names: Vec<&str> =
+            SUBCOMMANDS.iter().map(|(name, ..)| *name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "SUBCOMMANDS must stay sorted by command name so top-level help \
+             renders alphabetically"
+        );
+    }
+
+    #[test]
+    fn build_cli_renders_without_panicking() {
+        // `debug_assert`s inside clap fire during help rendering; exercise the
+        // full build so a malformed template or style is caught in tests.
+        super::build_cli().debug_assert();
+    }
 }
