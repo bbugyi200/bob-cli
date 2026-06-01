@@ -2,6 +2,8 @@
 create_time: 2026-06-01 10:06:38
 status: wip
 prompt: sdd/prompts/202606/bob_cli_migration_3.md
+bead_id: bob-cli-1
+tier: epic
 ---
 # Bob CLI Migration Plan
 
