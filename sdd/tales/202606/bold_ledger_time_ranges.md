@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-02 12:12:46
-status: wip
+status: done
 prompt: sdd/prompts/202606/bold_ledger_time_ranges.md
 ---
 # Bold Ledger Time Ranges Plan

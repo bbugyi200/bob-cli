@@ -937,6 +937,24 @@ done_tasks: \"[[done/obsidian_done]]\"
 }
 
 #[test]
+fn pomodoro_formats_native_pomodoro_status() {
+    let temp = TempDir::new("bob-cli-pomodoro-path");
+    let output = bob_command()
+        .arg("pomodoro")
+        .env(
+            "BOB_DAY_FILE",
+            fixture("pomodoro/day_with_open_pomodoro.md"),
+        )
+        .env("BOB_NOW", "2026-06-01 09:10:01")
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob pomodoro");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");
+}
+
+#[test]
 fn tmux_pomodoro_formats_native_pomodoro_status() {
     let temp = TempDir::new("bob-cli-tmux-path");
     let output = bob_command()
@@ -968,6 +986,43 @@ fn script_pomodoro_accepts_inline_duration_field_in_time_range() {
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
         .expect("run script bob pomodoro");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");
+}
+
+#[test]
+fn pomodoro_accepts_legacy_unbolded_inline_duration_field_in_time_range() {
+    let temp = TempDir::new("bob-cli-pomodoro-legacy");
+    let output = bob_command()
+        .arg("pomodoro")
+        .env(
+            "BOB_DAY_FILE",
+            fixture("pomodoro/day_with_legacy_open_pomodoro.md"),
+        )
+        .env("BOB_NOW", "2026-06-01 09:10:01")
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob pomodoro with legacy time range");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");
+}
+
+#[test]
+fn script_pomodoro_accepts_legacy_unbolded_time_range() {
+    let temp = TempDir::new("bob-cli-script-pomodoro-legacy");
+    let output = bob_command()
+        .arg("pomodoro")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env(
+            "BOB_DAY_FILE",
+            fixture("pomodoro/day_with_legacy_open_pomodoro.md"),
+        )
+        .env("BOB_NOW", "2026-06-01 09:10:01")
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run script bob pomodoro with legacy time range");
 
     assert_success(&output);
     assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");

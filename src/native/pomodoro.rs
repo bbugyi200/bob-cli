@@ -282,12 +282,7 @@ fn task_time_range(task: &str) -> Option<(&str, String, String)> {
         let close = after_open + close_offset;
         let inside = &task[after_open..close];
 
-        if let Some((raw_start, raw_end)) = inside.split_once('-')
-            && let (Some(start), Some(end)) = (
-                normalized_hhmm(raw_start.trim()),
-                normalized_leading_hhmm(raw_end),
-            )
-        {
+        if let Some((start, end)) = parse_parenthetical_time_range(inside) {
             let raw_range = &task[open..close + ')'.len_utf8()];
             return Some((raw_range, start, end));
         }
@@ -298,12 +293,26 @@ fn task_time_range(task: &str) -> Option<(&str, String, String)> {
     None
 }
 
+fn parse_parenthetical_time_range(inside: &str) -> Option<(String, String)> {
+    let (raw_start, raw_end) = inside.split_once('-')?;
+    let raw_start = raw_start.trim();
+    let (raw_start, bold) = if let Some(start) = raw_start.strip_prefix("**") {
+        (start, true)
+    } else {
+        (raw_start, false)
+    };
+    let start = normalized_hhmm(raw_start.trim())?;
+    let end = normalized_leading_hhmm(raw_end, bold)?;
+
+    Some((start, end))
+}
+
 fn normalized_hhmm(value: &str) -> Option<String> {
     let time = bob_env::parse_hhmm(value)?;
     Some(format!("{:02}{:02}", time.hour(), time.minute()))
 }
 
-fn normalized_leading_hhmm(value: &str) -> Option<String> {
+fn normalized_leading_hhmm(value: &str, bold: bool) -> Option<String> {
     let trimmed = value.trim_start();
     let end = trimmed
         .find(|character: char| {
@@ -315,11 +324,14 @@ fn normalized_leading_hhmm(value: &str) -> Option<String> {
         return None;
     }
 
-    if end < trimmed.len()
-        && !trimmed[end..]
-            .chars()
-            .next()
-            .is_some_and(char::is_whitespace)
+    let mut rest = &trimmed[end..];
+    if bold {
+        rest = rest.strip_prefix("**")?;
+    } else if rest.starts_with("**") {
+        return None;
+    }
+
+    if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace)
     {
         return None;
     }
