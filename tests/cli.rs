@@ -80,6 +80,29 @@ fn pomodoro_runtimes_help_runs_without_script_cache() {
 }
 
 #[test]
+fn collect_done_help_is_native_only() {
+    let temp = TempDir::new("bob-cli-collect-done-native-help");
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--help")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env("XDG_CACHE_HOME", temp.path())
+        .output()
+        .expect("run native-only bob collect-done --help");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("usage: bob collect-done"),
+        "expected collect-done help text:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !temp.path().join("bob-cli/scripts").exists(),
+        "native-only collect-done should not extract script assets"
+    );
+}
+
+#[test]
 fn pass_through_arguments_and_exit_statuses_reach_runtimes_command() {
     let temp = TempDir::new("bob-cli-runtimes-check");
     let stub_bin = temp.path().join("bin");
@@ -474,6 +497,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     let help = stdout(&output);
 
     let order = [
+        "collect-done",
         "notify",
         "pomodoro",
         "pomodoro-runtimes",
@@ -495,6 +519,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
 
     assert!(
         help.contains("Examples:")
+            && help.contains("bob collect-done --threshold 10")
             && help.contains("bob pomodoro-runtimes --check"),
         "expected an Examples section:\n{help}"
     );

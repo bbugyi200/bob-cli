@@ -18,40 +18,54 @@ use clap::{
 use crate::native::{self, NativeCommand};
 use crate::scripts::{embedded_assets, script_by_command, EmbeddedAsset};
 
+#[derive(Debug, Clone, Copy)]
+struct Subcommand {
+    name: &'static str,
+    script_command: Option<&'static str>,
+    about: &'static str,
+    native_command: NativeCommand,
+}
+
 // Keep this table sorted alphabetically by command name; the top-level help
 // renders subcommands in declaration order, and `subcommands_are_sorted` guards
 // the invariant.
-const SUBCOMMANDS: &[(&str, &str, &str, NativeCommand)] = &[
-    (
-        "notify",
-        "bob_notify",
-        "Notify when the current Pomodoro is complete",
-        NativeCommand::Notify,
-    ),
-    (
-        "pomodoro",
-        "bob_pomodoro",
-        "Show the current Pomodoro status",
-        NativeCommand::Pomodoro,
-    ),
-    (
-        "pomodoro-runtimes",
-        "bob_pomodoro_runtimes",
-        "Annotate Pomodoro ledger entries with runtimes",
-        NativeCommand::PomodoroRuntimes,
-    ),
-    (
-        "sync",
-        "bob_sync",
-        "Sync the Obsidian vault",
-        NativeCommand::Sync,
-    ),
-    (
-        "tmux-pomodoro",
-        "tmux_bob_pomodoro",
-        "Print Pomodoro status for tmux",
-        NativeCommand::TmuxPomodoro,
-    ),
+const SUBCOMMANDS: &[Subcommand] = &[
+    Subcommand {
+        name: "collect-done",
+        script_command: None,
+        about: "Collect done and canceled tasks into archive notes",
+        native_command: NativeCommand::CollectDone,
+    },
+    Subcommand {
+        name: "notify",
+        script_command: Some("bob_notify"),
+        about: "Notify when the current Pomodoro is complete",
+        native_command: NativeCommand::Notify,
+    },
+    Subcommand {
+        name: "pomodoro",
+        script_command: Some("bob_pomodoro"),
+        about: "Show the current Pomodoro status",
+        native_command: NativeCommand::Pomodoro,
+    },
+    Subcommand {
+        name: "pomodoro-runtimes",
+        script_command: Some("bob_pomodoro_runtimes"),
+        about: "Annotate Pomodoro ledger entries with runtimes",
+        native_command: NativeCommand::PomodoroRuntimes,
+    },
+    Subcommand {
+        name: "sync",
+        script_command: Some("bob_sync"),
+        about: "Sync the Obsidian vault",
+        native_command: NativeCommand::Sync,
+    },
+    Subcommand {
+        name: "tmux-pomodoro",
+        script_command: Some("tmux_bob_pomodoro"),
+        about: "Print Pomodoro status for tmux",
+        native_command: NativeCommand::TmuxPomodoro,
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -115,7 +129,12 @@ pub fn run_legacy(script_command: &'static str) -> i32 {
         return run_script_or_report(script_command, script_command, args);
     };
 
-    run_command_or_report(script_command, script_command, native_command, args)
+    run_command_or_report(
+        script_command,
+        Some(script_command),
+        native_command,
+        args,
+    )
 }
 
 pub fn run_script(
@@ -182,6 +201,7 @@ const HELP_TEMPLATE: &str = "\
 
 const AFTER_HELP: &str = "\
 Examples:
+  bob collect-done --threshold 10  Archive done and canceled tasks
   bob pomodoro                   Show today's Pomodoro status
   bob sync                       Sync the Obsidian vault
   bob pomodoro-runtimes --check  Preview ledger runtime updates (no writes)
@@ -207,8 +227,9 @@ fn build_cli() -> ClapCommand {
         .subcommand_required(true)
         .arg_required_else_help(true);
 
-    for (subcommand, _, about, _) in SUBCOMMANDS {
-        command = command.subcommand(delegate_subcommand(subcommand, about));
+    for subcommand in SUBCOMMANDS {
+        command = command
+            .subcommand(delegate_subcommand(subcommand.name, subcommand.about));
     }
 
     command
@@ -229,21 +250,22 @@ fn delegate_subcommand(name: &'static str, about: &'static str) -> ClapCommand {
 
 fn command_for_subcommand(
     subcommand: &str,
-) -> Option<(&'static str, NativeCommand)> {
-    SUBCOMMANDS
-        .iter()
-        .find_map(|(name, script_command, _, native_command)| {
-            (*name == subcommand).then_some((*script_command, *native_command))
-        })
+) -> Option<(Option<&'static str>, NativeCommand)> {
+    SUBCOMMANDS.iter().find_map(|command| {
+        (command.name == subcommand)
+            .then_some((command.script_command, command.native_command))
+    })
 }
 
 fn run_command_or_report(
     invocation: &str,
-    script_command: &'static str,
+    script_command: Option<&'static str>,
     native_command: NativeCommand,
     args: Vec<OsString>,
 ) -> i32 {
-    if use_script_fallback() {
+    if use_script_fallback()
+        && let Some(script_command) = script_command
+    {
         return run_script_or_report(invocation, script_command, args);
     }
 
@@ -423,7 +445,7 @@ mod tests {
     #[test]
     fn subcommands_are_sorted_alphabetically() {
         let names: Vec<&str> =
-            SUBCOMMANDS.iter().map(|(name, ..)| *name).collect();
+            SUBCOMMANDS.iter().map(|command| command.name).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(
