@@ -1,18 +1,32 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
-all: fmt lint test
+# Horizontal rule drawn beneath each section title (single source for width/char).
+rule := "────────────────────────────────────────────────"
 
-fmt:
-    @printf '==> format\n'
+all: fmt lint test
+    @if [[ -t 1 ]]; then \
+        printf '\n  \033[1;32m✓  ALL CHECKS PASSED\033[0m\n\n'; \
+    else \
+        printf '\n  ✓  ALL CHECKS PASSED\n\n'; \
+    fi
+
+fmt: (_banner "34" "🎨" "FORMAT")
     cargo fmt --check
 
-lint:
-    @printf '==> lint\n'
+lint: (_banner "33" "🔍" "LINT")
     cargo clippy --all-targets --all-features
 
-test:
-    @printf '==> test\n'
+test: (_banner "32" "🧪" "TEST")
     cargo test
+
+# Render a themed section banner: blank line, bold colored title + icon, colored rule.
+# Emits ANSI styling on a TTY and clean plain text when output is piped/redirected.
+_banner color icon label:
+    @if [[ -t 1 ]]; then \
+        printf '\n%s  \033[1;%sm%s\033[0m\n\033[%sm%s\033[0m\n' '{{icon}}' '{{color}}' '{{label}}' '{{color}}' '{{rule}}'; \
+    else \
+        printf '\n%s  %s\n%s\n' '{{icon}}' '{{label}}' '{{rule}}'; \
+    fi
 
 check-scripts:
     bash -n scripts/bob_notify scripts/bob_pomodoro scripts/bob_sync scripts/tmux_bob_pomodoro scripts/lib/bob_shell.sh
