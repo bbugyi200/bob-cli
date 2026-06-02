@@ -1,12 +1,17 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+all: fmt lint test
+
 fmt:
+    @printf '==> format\n'
     cargo fmt --check
 
 lint:
+    @printf '==> lint\n'
     cargo clippy --all-targets --all-features
 
 test:
+    @printf '==> test\n'
     cargo test
 
 check-scripts:
