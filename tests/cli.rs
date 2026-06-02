@@ -103,6 +103,206 @@ fn collect_done_help_is_native_only() {
 }
 
 #[test]
+fn collect_done_runs_sync_before_writing_archive_and_source_files() {
+    let temp = TempDir::new("bob-cli-collect-done-sync");
+    let stub_bin = temp.path().join("bin");
+    let vault = temp.path().join("vault");
+    let source = vault.join("foo/bar.md");
+    let archive = vault.join("done/foo/bar_done.md");
+    let log = temp.path().join("commands.log");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    write_file(
+        &source,
+        "\
+# Project
+
+- [x] done one #task
+  detail
+- [-] canceled two #task
+- [ ] active #task
+",
+    );
+    write_executable(
+        &stub_bin.join("ob"),
+        r#"#!/bin/sh
+printf 'ob %s\n' "$*" >> "$STUB_LOG"
+if [ "$1" = "sync" ]; then
+  if [ -f "$ARCHIVE_FILE" ]; then
+    printf 'archive-exists-before-sync\n' >> "$STUB_LOG"
+  else
+    printf 'archive-missing-before-sync\n' >> "$STUB_LOG"
+  fi
+  if grep -q 'done one' "$SOURCE_FILE"; then
+    printf 'source-has-task-before-sync\n' >> "$STUB_LOG"
+  else
+    printf 'source-mutated-before-sync\n' >> "$STUB_LOG"
+  fi
+  exit 0
+fi
+exit 64
+"#,
+    );
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold")
+        .arg("2")
+        .env("BOB_DIR", &vault)
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("STUB_LOG", &log)
+        .env("SOURCE_FILE", &source)
+        .env("ARCHIVE_FILE", &archive)
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done");
+
+    assert_success(&output);
+    let log_contents = fs::read_to_string(&log).expect("read stub log");
+    assert!(
+        log_contents.contains(&format!("ob sync --path {}", vault.display())),
+        "expected ob sync call:\n{log_contents}"
+    );
+    assert!(
+        log_contents.contains("archive-missing-before-sync"),
+        "archive should not be written before sync:\n{log_contents}"
+    );
+    assert!(
+        log_contents.contains("source-has-task-before-sync"),
+        "source should not be rewritten before sync:\n{log_contents}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        "\
+# Project
+
+- [ ] active #task
+"
+    );
+    assert_eq!(
+        fs::read_to_string(&archive).expect("read archive"),
+        "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] done one #task
+  detail
+- [-] canceled two #task
+"
+    );
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("sync:")
+            && stdout.contains("scan:")
+            && stdout.contains("moves:")
+            && stdout.contains("summary:"),
+        "expected collect-done output sections:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn collect_done_skips_missing_ob_command_and_writes_vault_changes() {
+    let temp = TempDir::new("bob-cli-collect-done-no-ob");
+    let vault = temp.path().join("vault");
+    let path_without_ob = temp.path().join("empty-bin");
+    let source = vault.join("obsidian.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&path_without_ob).expect("create empty PATH dir");
+    write_file(
+        &source,
+        "\
+- [x] done #task
+- [ ] active #task
+",
+    );
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=1")
+        .env_remove("OB_COMMAND")
+        .env("BOB_DIR", &vault)
+        .env("PATH", &path_without_ob)
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done without ob");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("skipped: ob command not found"),
+        "expected explicit missing-ob output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        "- [ ] active #task\n"
+    );
+    assert!(fs::read_to_string(&archive)
+        .expect("read archive")
+        .contains("parent: \"[[done]]\""));
+}
+
+#[test]
+fn collect_done_failing_sync_stops_before_mutation() {
+    let temp = TempDir::new("bob-cli-collect-done-sync-fail");
+    let stub_bin = temp.path().join("bin");
+    let vault = temp.path().join("vault");
+    let source = vault.join("obsidian.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    write_file(
+        &source,
+        "\
+- [x] done #task
+- [ ] active #task
+",
+    );
+    write_executable(
+        &stub_bin.join("ob"),
+        r#"#!/bin/sh
+if [ "$1" = "sync" ]; then
+  printf 'sync failed\n' >&2
+  exit 42
+fi
+exit 64
+"#,
+    );
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=1")
+        .env("BOB_DIR", &vault)
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done with failing sync");
+
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "expected sync failure exit code:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("ob sync failed with exit code 42"),
+        "expected sync failure message:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        "\
+- [x] done #task
+- [ ] active #task
+"
+    );
+    assert!(
+        !archive.exists(),
+        "archive should not be created after failed sync"
+    );
+}
+
+#[test]
 fn pass_through_arguments_and_exit_statuses_reach_runtimes_command() {
     let temp = TempDir::new("bob-cli-runtimes-check");
     let stub_bin = temp.path().join("bin");
@@ -567,6 +767,16 @@ fn path_with_prefix(prefix: &Path) -> String {
         .expect("join PATH")
         .into_string()
         .expect("PATH is UTF-8")
+}
+
+fn write_file(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|error| {
+            panic!("create parent {}: {error}", parent.display())
+        });
+    }
+    fs::write(path, contents)
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }
 
 fn write_executable(path: &Path, contents: &str) {

@@ -1,13 +1,18 @@
 use std::{
+    env,
     ffi::{OsStr, OsString},
     fs, io,
     path::{Component, Path, PathBuf},
+    process::{self, Command, Output, Stdio},
 };
 
 use super::env as bob_env;
 
 const COMMAND_NAME: &str = "bob collect-done";
 const DEFAULT_THRESHOLD: usize = 10;
+const ARCHIVE_PARENT_LINE: &str = "parent: \"[[done]]\"";
+const SYNC_ALREADY_RUNNING_MESSAGE: &str =
+    "Another sync instance is already running for this vault.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Args {
@@ -50,6 +55,12 @@ struct FilePlan {
     archive_append: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveWrite {
+    Created,
+    Updated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Transform {
     task_count: usize,
@@ -79,6 +90,24 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
 
 fn run_collect_done(args: Args) -> i32 {
     let vault = bob_env::bob_dir();
+
+    println!("Collect done tasks");
+    println!("vault: {}", vault.display());
+    println!("threshold: {}", args.threshold);
+    println!("sync:");
+    match run_ob_sync(&vault) {
+        Ok(SyncOutcome::Ran) => {
+            println!("  completed: ob sync --path {}", vault.display());
+        }
+        Ok(SyncOutcome::SkippedMissingCommand) => {
+            println!("  skipped: ob command not found");
+        }
+        Ok(SyncOutcome::AlreadyRunning) => {
+            println!("  continuing: ob sync is already running");
+        }
+        Err(exit_code) => return exit_code,
+    }
+
     let plan = match build_collection_plan(&vault, args.threshold) {
         Ok(plan) => plan,
         Err(error) => {
@@ -90,9 +119,6 @@ fn run_collect_done(args: Args) -> i32 {
         }
     };
 
-    println!("Collect done tasks");
-    println!("vault: {}", vault.display());
-    println!("threshold: {}", args.threshold);
     println!("scan:");
     println!("  markdown files: {}", plan.scanned_files);
     println!("  files meeting threshold: {}", plan.files.len());
@@ -100,13 +126,16 @@ fn run_collect_done(args: Args) -> i32 {
     println!("  planned bytes: {}", plan.planned_bytes());
 
     if plan.files.is_empty() {
-        println!(
-            "summary: no task blocks met the threshold; no vault changes made."
-        );
+        println!("moves:");
+        println!("  none");
+        println!("summary:");
+        println!("  no task blocks met the threshold; no vault changes made.");
         return 0;
     }
 
     println!("moves:");
+    let mut archives_created = 0;
+    let mut archives_updated = 0;
     for file in &plan.files {
         println!(
             "  {} -> {} ({} task blocks)",
@@ -114,9 +143,257 @@ fn run_collect_done(args: Args) -> i32 {
             file.relative_archive_path.display(),
             file.task_count
         );
+        match apply_file_plan(&vault, file) {
+            Ok(ArchiveWrite::Created) => archives_created += 1,
+            Ok(ArchiveWrite::Updated) => archives_updated += 1,
+            Err(error) => {
+                eprintln!(
+                    "{COMMAND_NAME}: failed to write vault changes: {error}"
+                );
+                return 1;
+            }
+        }
     }
-    println!("summary: scan plan built in memory; no vault changes made.");
+    println!("summary:");
+    println!("  moved task blocks: {}", plan.total_task_count());
+    println!("  source files updated: {}", plan.files.len());
+    println!("  archive files created: {archives_created}");
+    println!("  archive files updated: {archives_updated}");
     0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncOutcome {
+    Ran,
+    SkippedMissingCommand,
+    AlreadyRunning,
+}
+
+fn run_ob_sync(vault: &Path) -> Result<SyncOutcome, i32> {
+    let ob_command = env::var_os("OB_COMMAND")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from("ob"));
+
+    let output = Command::new(&ob_command)
+        .arg("sync")
+        .arg("--path")
+        .arg(vault)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(SyncOutcome::SkippedMissingCommand);
+        }
+        Err(error) => {
+            eprintln!("{COMMAND_NAME}: failed to run ob sync: {error}");
+            return Err(1);
+        }
+    };
+
+    let sync_output = merged_output(&output);
+    if output.status.success() {
+        write_stdout_output(&sync_output);
+        return Ok(SyncOutcome::Ran);
+    }
+
+    if sync_output.contains(SYNC_ALREADY_RUNNING_MESSAGE) {
+        return Ok(SyncOutcome::AlreadyRunning);
+    }
+
+    write_stderr_output(&sync_output);
+    let exit_code = bob_env::exit_code(output.status);
+    eprintln!("{COMMAND_NAME}: ob sync failed with exit code {exit_code}");
+    Err(exit_code)
+}
+
+fn merged_output(output: &Output) -> String {
+    let mut merged = String::new();
+    merged.push_str(&String::from_utf8_lossy(&output.stdout));
+    merged.push_str(&String::from_utf8_lossy(&output.stderr));
+    merged
+}
+
+fn write_stdout_output(output: &str) {
+    if !output.is_empty() {
+        print!("{output}");
+    }
+}
+
+fn write_stderr_output(output: &str) {
+    if !output.is_empty() {
+        eprint!("{output}");
+    }
+}
+
+fn apply_file_plan(vault: &Path, file: &FilePlan) -> io::Result<ArchiveWrite> {
+    let source_path = vault.join(&file.relative_source_path);
+    let archive_path = vault.join(&file.relative_archive_path);
+    let existing_archive = read_optional_string(&archive_path)?;
+    let archive_write = if existing_archive.is_some() {
+        ArchiveWrite::Updated
+    } else {
+        ArchiveWrite::Created
+    };
+    let archive_contents =
+        archive_contents(existing_archive.as_deref(), &file.archive_append);
+
+    atomic_write(&archive_path, &archive_contents)?;
+    atomic_write(&source_path, &file.source_contents)?;
+
+    Ok(archive_write)
+}
+
+fn read_optional_string(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_error("read", path, error)),
+    }
+}
+
+fn archive_contents(
+    existing_archive: Option<&str>,
+    archive_append: &str,
+) -> String {
+    let mut contents = match existing_archive {
+        Some(contents) => ensure_archive_frontmatter(contents),
+        None => archive_frontmatter(archive_append),
+    };
+    append_archive_blocks(&mut contents, archive_append);
+    contents
+}
+
+fn ensure_archive_frontmatter(contents: &str) -> String {
+    let newline = preferred_line_ending(contents);
+    let lines: Vec<&str> = contents.split_inclusive('\n').collect();
+
+    if lines
+        .first()
+        .map(|line| is_frontmatter_marker(split_line_ending(line).0))
+        != Some(true)
+    {
+        let mut with_frontmatter = archive_frontmatter(contents);
+        with_frontmatter.push_str(contents);
+        return with_frontmatter;
+    }
+
+    let Some(closing_index) =
+        lines.iter().enumerate().skip(1).find_map(|(index, line)| {
+            is_frontmatter_marker(split_line_ending(line).0).then_some(index)
+        })
+    else {
+        let mut with_frontmatter = archive_frontmatter(contents);
+        with_frontmatter.push_str(contents);
+        return with_frontmatter;
+    };
+
+    let mut result = String::with_capacity(contents.len() + 64);
+    let mut parent_written = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            result.push_str(line);
+        } else if index < closing_index {
+            let (content, ending) = split_line_ending(line);
+            if is_parent_frontmatter_line(content) {
+                result.push_str(ARCHIVE_PARENT_LINE);
+                result.push_str(if ending.is_empty() {
+                    newline
+                } else {
+                    ending
+                });
+                parent_written = true;
+            } else {
+                result.push_str(line);
+            }
+        } else if index == closing_index {
+            if !parent_written {
+                result.push_str(ARCHIVE_PARENT_LINE);
+                result.push_str(newline);
+            }
+            result.push_str(line);
+        } else {
+            result.push_str(line);
+        }
+    }
+
+    result
+}
+
+fn archive_frontmatter(sample: &str) -> String {
+    let newline = preferred_line_ending(sample);
+    format!("---{newline}{ARCHIVE_PARENT_LINE}{newline}---{newline}{newline}")
+}
+
+fn append_archive_blocks(contents: &mut String, archive_append: &str) {
+    if archive_append.is_empty() {
+        return;
+    }
+
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(archive_append);
+}
+
+fn preferred_line_ending(contents: &str) -> &'static str {
+    if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn is_frontmatter_marker(content: &str) -> bool {
+    content.trim() == "---"
+}
+
+fn is_parent_frontmatter_line(content: &str) -> bool {
+    content.trim_start().starts_with("parent:")
+}
+
+fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            fs_error("create parent directory", parent, error)
+        })?;
+    }
+
+    let temp_path = temporary_write_path(path)?;
+    let _ = fs::remove_file(&temp_path);
+    fs::write(&temp_path, contents)
+        .map_err(|error| fs_error("write temporary file", &temp_path, error))?;
+    fs::rename(&temp_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        fs_error("install file", path, error)
+    })?;
+    Ok(())
+}
+
+fn temporary_write_path(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no file name: {}", path.display()),
+        )
+    })?;
+
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".{}.tmp", process::id()));
+    Ok(path.with_file_name(temp_name))
+}
+
+fn fs_error(action: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{action} {}: {error}", path.display()),
+    )
 }
 
 fn build_collection_plan(
@@ -471,8 +748,8 @@ options:
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_relative_path, build_collection_plan, parse_args,
-        transform_markdown, Args, ParseResult, DEFAULT_THRESHOLD,
+        archive_contents, archive_relative_path, build_collection_plan,
+        parse_args, transform_markdown, Args, ParseResult, DEFAULT_THRESHOLD,
     };
     use std::{
         ffi::OsString,
@@ -623,6 +900,93 @@ mod tests {
         assert_eq!(
             archive_relative_path(Path::new("foo/bar.md")).unwrap(),
             PathBuf::from("done/foo/bar_done.md")
+        );
+    }
+
+    #[test]
+    fn creates_archive_frontmatter_for_new_archive_note() {
+        let contents = archive_contents(None, "- [x] done #task\n");
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] done #task
+"
+        );
+    }
+
+    #[test]
+    fn adds_archive_parent_to_existing_frontmatter() {
+        let contents = archive_contents(
+            Some(
+                "\
+---
+title: Existing archive
+---
+
+- [x] old #task
+",
+            ),
+            "- [-] canceled #task\n",
+        );
+
+        assert_eq!(
+            contents,
+            "\
+---
+title: Existing archive
+parent: \"[[done]]\"
+---
+
+- [x] old #task
+- [-] canceled #task
+"
+        );
+    }
+
+    #[test]
+    fn updates_existing_archive_parent_frontmatter() {
+        let contents = archive_contents(
+            Some(
+                "\
+---
+parent: \"[[old]]\"
+---
+",
+            ),
+            "- [x] done #task\n",
+        );
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[done]]\"
+---
+- [x] done #task
+"
+        );
+    }
+
+    #[test]
+    fn prepends_archive_frontmatter_when_existing_note_has_none() {
+        let contents =
+            archive_contents(Some("# Archive\n"), "- [x] done #task\n");
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[done]]\"
+---
+
+# Archive
+- [x] done #task
+"
         );
     }
 
