@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-02 12:47:27
-status: wip
+status: done
 prompt: sdd/prompts/202606/pomodoro_keymaps_update_ledger.md
 ---
 # Pomodoro Keymaps Ledger Update Plan
