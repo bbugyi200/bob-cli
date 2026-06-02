@@ -30,12 +30,37 @@ To smoke-test an install without replacing an existing user install:
 root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" pomodoro-runtimes --help
+"$root/bin/bob" collect-done --help
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" pomodoro
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" tmux-pomodoro
 "$root/bin/bob_notify" --help
 ```
 
 ## Commands
+
+```bash
+bob collect-done [--threshold N]
+```
+
+Scans the Bob vault for completed (`[x]`) and canceled (`[-]`) Markdown task
+blocks containing `#task`, then moves blocks from notes that meet the threshold
+into matching archive notes under `done/`. The default threshold is `10`; use a
+smaller value for a targeted collection pass, such as `--threshold 1` in a
+fixture vault.
+
+Archive paths mirror the source note path and add `_done` to the file stem. For
+example, `projects/foo.md` archives to `done/projects/foo_done.md`. Archive
+notes are created with `parent: "[[done]]"` frontmatter, and existing archive
+notes have that parent frontmatter inserted or repaired before new blocks are
+appended.
+
+Before writing files, `bob collect-done` runs `ob sync --path <vault>` when the
+configured `ob` command is available. Missing `ob` is reported as a skipped sync.
+Other sync failures stop the command before vault files are changed. In a Git
+worktree, the command refuses to modify source or archive candidates that already
+have uncommitted changes, stages only the files it touches, commits with a
+`bob collect-done YYYY-MM-DD` message, and pushes. Non-Git vaults are left
+uncommitted.
 
 ```bash
 bob pomodoro
@@ -97,9 +122,11 @@ are still useful for validating or forcing the embedded script fallback with
 
 The remaining runtime dependencies are:
 
-- `ob` from obsidian-headless for `bob sync`; `bob pomodoro-runtimes` uses it
-  opportunistically before annotation and skips sync when `ob` is unavailable
-- `git` and `ssh` for `bob sync`
+- `ob` from obsidian-headless for `bob sync` and pre-write
+  `bob collect-done` sync; `bob pomodoro-runtimes` uses it opportunistically
+  before annotation and skips sync when `ob` is unavailable
+- `git` and `ssh` for `bob sync` and for `bob collect-done` commit/push
+  behavior when the vault is a Git worktree
 - `notify-send` for desktop notifications from `bob notify`
 - `bash` only when `bob sync` needs to load `ob` through NVM or source
   `~/.ssh-agent-thing`
@@ -114,15 +141,18 @@ Rust binaries, and the binaries carry the script assets they need.
 `BOB_DAY_FILE` sets the exact daily note path used by `bob pomodoro`.
 
 `BOB_NOW` sets the current timestamp for Pomodoro status and default runtime note
-selection. Supported formats include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, and
+selection. It also controls the default `bob collect-done YYYY-MM-DD` commit
+message date. Supported formats include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, and
 `YYYY-MM-DD HH:MM:SS`.
 
 `DATE` preserves the legacy date override behavior. It can be a date command
 prefix such as `date --utc`, or a timestamp in the same formats accepted by
 `BOB_NOW`.
 
-`OB_COMMAND` overrides the `ob` executable used by `bob pomodoro-runtimes`. If
-that executable is unavailable, runtime annotation continues without syncing.
+`OB_COMMAND` overrides the `ob` executable used by `bob pomodoro-runtimes` and
+`bob collect-done`. If that executable is unavailable, runtime annotation
+continues without syncing, and collection reports the skipped sync before
+scanning the vault.
 
 `BOB_SYNC_LOCK_FILE` overrides the lock path used by `bob sync`.
 
@@ -133,8 +163,9 @@ that executable is unavailable, runtime annotation continues without syncing.
 ## Migration Notes
 
 Use `bob pomodoro`, `bob pomodoro-runtimes`, `bob notify`, `bob sync`, and
-`bob tmux-pomodoro` for new integrations. The legacy command names are installed
-only as compatibility shims for existing callers.
+`bob tmux-pomodoro` for new integrations, and run `bob collect-done` when done
+and canceled task blocks should be archived from the vault. The legacy command
+names are installed only as compatibility shims for existing callers.
 
 The original script implementations remain embedded only as a rollback path.
 New integrations should rely on the native Rust command behavior.
@@ -157,6 +188,7 @@ Run a local install smoke test:
 root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" pomodoro-runtimes --help
+"$root/bin/bob" collect-done --help
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" pomodoro
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" tmux-pomodoro
 ```
@@ -169,3 +201,11 @@ tmux display-message -p '#(bob tmux-pomodoro)'
 
 Before running `bob sync` in a release smoke test, verify that `BOB_DIR` points
 at the intended vault and that its Git remote can be pushed without prompts.
+Before running `bob collect-done` against the real vault, verify that `~/bob` is
+the intended vault, inspect `git -C ~/bob status --short`, and expect the command
+to skip candidate files that are already dirty.
+
+For an end-to-end collection smoke test, install the local binary, run
+`bob collect-done` against `~/bob`, then verify that archive notes under
+`~/bob/done` include `parent: "[[done]]"`, source notes no longer contain the
+collected blocks, and the vault Git commit was pushed.
