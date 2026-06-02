@@ -188,7 +188,8 @@ done_tasks: \"[[done/foo/bar_done]]\"
         fs::read_to_string(&archive).expect("read archive"),
         "\
 ---
-parent: \"[[done]]\"
+parent: \"[[foo/bar]]\"
+type: \"[[done]]\"
 ---
 
 - [x] done one #task
@@ -217,7 +218,17 @@ fn collect_done_runs_sync_before_metadata_only_source_writes() {
     let log = temp.path().join("commands.log");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
     write_file(&source, "- [ ] active #task\n");
-    write_file(&archive, "- [x] archived #task\n");
+    write_file(
+        &archive,
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+",
+    );
     write_executable(
         &stub_bin.join("ob"),
         r#"#!/bin/sh
@@ -267,7 +278,14 @@ done_tasks: \"[[done/obsidian_done]]\"
     );
     assert_eq!(
         fs::read_to_string(&archive).expect("read archive"),
-        "- [x] archived #task\n"
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+"
     );
     assert!(
         stdout(&output).contains("source done_tasks updates: 1")
@@ -319,9 +337,12 @@ done_tasks: \"[[done/obsidian_done]]\"
 - [ ] active #task
 "
     );
-    assert!(fs::read_to_string(&archive)
-        .expect("read archive")
-        .contains("parent: \"[[done]]\""));
+    let archive_contents = fs::read_to_string(&archive).expect("read archive");
+    assert!(
+        archive_contents.contains("parent: \"[[obsidian]]\"")
+            && archive_contents.contains("type: \"[[done]]\""),
+        "expected archive metadata:\n{archive_contents}"
+    );
 }
 
 #[test]
@@ -435,9 +456,13 @@ done_tasks: \"[[done/obsidian_done]]\"
 - [ ] active #task
 "
     );
-    assert!(fs::read_to_string(&archive)
-        .expect("read archive")
-        .contains("- [x] done #task"));
+    let archive_contents = fs::read_to_string(&archive).expect("read archive");
+    assert!(
+        archive_contents.contains("parent: \"[[obsidian]]\"")
+            && archive_contents.contains("type: \"[[done]]\"")
+            && archive_contents.contains("- [x] done #task"),
+        "expected archive metadata and moved task:\n{archive_contents}"
+    );
 
     let show = stdout(&git_in(
         &vault,
@@ -487,7 +512,17 @@ fn collect_done_commits_metadata_only_source_updates() {
     fs::create_dir_all(&stub_bin).expect("create stub bin");
     write_successful_ob_stub(&stub_bin);
     write_file(&source, "- [ ] active #task\n");
-    write_file(&archive, "- [x] archived #task\n");
+    write_file(
+        &archive,
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+",
+    );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
     git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
@@ -523,7 +558,14 @@ done_tasks: \"[[done/obsidian_done]]\"
     );
     assert_eq!(
         fs::read_to_string(&archive).expect("read archive"),
-        "- [x] archived #task\n"
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+"
     );
 
     let show = stdout(&git_in(
@@ -541,6 +583,103 @@ done_tasks: \"[[done/obsidian_done]]\"
     assert!(
         !show.contains("\ndone/obsidian_done.md\n"),
         "metadata-only commit should not stage archive:\n{show}"
+    );
+
+    let remote_head =
+        stdout(&git(["--git-dir", path_str(&remote), "rev-parse", "HEAD"]));
+    let local_head = stdout(&git_in(&vault, ["rev-parse", "HEAD"]));
+    assert_eq!(remote_head, local_head, "push should update bare remote");
+}
+
+#[test]
+fn collect_done_commits_metadata_only_archive_repairs() {
+    let temp = TempDir::new("bob-cli-collect-done-git-archive-metadata");
+    let stub_bin = temp.path().join("bin");
+    let (vault, remote) = init_git_vault_with_remote(&temp);
+    let source = vault.join("obsidian.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    write_successful_ob_stub(&stub_bin);
+    write_file(
+        &source,
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+",
+    );
+    write_file(
+        &archive,
+        "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] archived #task
+",
+    );
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=10")
+        .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done archive metadata-only in git repo");
+
+    assert_success(&output);
+    let output_text = stdout(&output);
+    assert!(
+        output_text.contains("archive metadata repairs: 1")
+            && output_text.contains("committed: bob collect-done 2026-06-02")
+            && output_text.contains("pushed"),
+        "expected archive metadata commit and push:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+"
+    );
+    assert_eq!(
+        fs::read_to_string(&archive).expect("read archive"),
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+"
+    );
+
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        show.starts_with("bob collect-done 2026-06-02\n"),
+        "expected collect-done commit subject:\n{show}"
+    );
+    assert!(
+        !show.contains("\nobsidian.md\n"),
+        "archive-only commit should not stage source:\n{show}"
+    );
+    assert!(
+        show.contains("\ndone/obsidian_done.md\n"),
+        "expected archive in metadata repair commit:\n{show}"
     );
 
     let remote_head =
@@ -677,7 +816,17 @@ fn collect_done_refuses_dirty_metadata_only_source_before_mutation() {
     git_in(&vault, ["config", "user.name", "Test User"]);
     git_in(&vault, ["config", "user.email", "test@example.com"]);
     write_file(&source, "- [ ] active #task\n");
-    write_file(&archive, "- [x] archived #task\n");
+    write_file(
+        &archive,
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+",
+    );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
     let dirty_source = "- [ ] active #task\nlocal edit\n";
@@ -715,7 +864,101 @@ fn collect_done_refuses_dirty_metadata_only_source_before_mutation() {
     );
     assert_eq!(
         fs::read_to_string(&archive).expect("read archive"),
-        "- [x] archived #task\n"
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+"
+    );
+}
+
+#[test]
+fn collect_done_refuses_dirty_metadata_only_archive_before_mutation() {
+    let temp = TempDir::new("bob-cli-collect-done-dirty-archive");
+    let stub_bin = temp.path().join("bin");
+    let vault = temp.path().join("vault");
+    let source = vault.join("obsidian.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_successful_ob_stub(&stub_bin);
+    git_in(&vault, ["init", "-q"]);
+    git_in(&vault, ["config", "user.name", "Test User"]);
+    git_in(&vault, ["config", "user.email", "test@example.com"]);
+    write_file(
+        &source,
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+",
+    );
+    write_file(
+        &archive,
+        "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] archived #task
+",
+    );
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    let dirty_archive = "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] archived #task
+local edit
+";
+    write_file(&archive, dirty_archive);
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=10")
+        .env("BOB_DIR", &vault)
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done with dirty archive metadata candidate");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected dirty candidate failure:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output)
+            .contains("refusing: pre-existing changes in candidate files"),
+        "expected dirty candidate stdout:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("done/obsidian_done.md"),
+        "expected dirty archive candidate path in stderr:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+"
+    );
+    assert_eq!(
+        fs::read_to_string(&archive).expect("read archive"),
+        dirty_archive
     );
 }
 

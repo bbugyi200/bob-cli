@@ -11,7 +11,7 @@ use super::env as bob_env;
 
 const COMMAND_NAME: &str = "bob collect-done";
 const DEFAULT_THRESHOLD: usize = 10;
-const ARCHIVE_PARENT_LINE: &str = "parent: \"[[done]]\"";
+const ARCHIVE_TYPE_LINE: &str = "type: \"[[done]]\"";
 const DONE_TASKS_KEY: &str = "done_tasks:";
 const SYNC_ALREADY_RUNNING_MESSAGE: &str =
     "Another sync instance is already running for this vault.";
@@ -41,9 +41,13 @@ impl CollectionPlan {
     }
 
     fn task_move_file_count(&self) -> usize {
+        self.files.iter().filter(|file| file.task_count > 0).count()
+    }
+
+    fn source_file_update_count(&self) -> usize {
         self.files
             .iter()
-            .filter(|file| file.writes_archive())
+            .filter(|file| file.writes_source())
             .count()
     }
 
@@ -54,10 +58,29 @@ impl CollectionPlan {
             .count()
     }
 
+    fn archive_metadata_update_count(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|file| file.archive_metadata_updated)
+            .count()
+    }
+
     fn planned_bytes(&self) -> usize {
         self.files
             .iter()
-            .map(|file| file.source_contents.len() + file.archive_append.len())
+            .map(|file| {
+                let source_bytes = if file.writes_source() {
+                    file.source_contents.len()
+                } else {
+                    0
+                };
+                let archive_bytes = file
+                    .archive_contents
+                    .as_ref()
+                    .map(String::len)
+                    .unwrap_or(0);
+                source_bytes + archive_bytes
+            })
             .sum()
     }
 }
@@ -68,13 +91,18 @@ struct FilePlan {
     relative_archive_path: PathBuf,
     task_count: usize,
     source_contents: String,
-    archive_append: String,
+    archive_contents: Option<String>,
     source_metadata_updated: bool,
+    archive_metadata_updated: bool,
 }
 
 impl FilePlan {
+    fn writes_source(&self) -> bool {
+        self.task_count > 0 || self.source_metadata_updated
+    }
+
     fn writes_archive(&self) -> bool {
-        self.task_count > 0
+        self.archive_contents.is_some()
     }
 }
 
@@ -174,6 +202,10 @@ fn run_collect_done(args: Args) -> i32 {
         "  source done_tasks updates: {}",
         plan.source_metadata_update_count()
     );
+    println!(
+        "  archive metadata repairs: {}",
+        plan.archive_metadata_update_count()
+    );
     println!("  planned bytes: {}", plan.planned_bytes());
 
     if plan.files.is_empty() {
@@ -208,12 +240,26 @@ fn run_collect_done(args: Args) -> i32 {
     let mut archives_updated = 0;
     for file in &plan.files {
         if file.writes_archive() {
-            println!(
-                "  {} -> {} ({} task blocks)",
-                file.relative_source_path.display(),
-                file.relative_archive_path.display(),
-                file.task_count
-            );
+            if file.task_count > 0 {
+                println!(
+                    "  {} -> {} ({} task blocks)",
+                    file.relative_source_path.display(),
+                    file.relative_archive_path.display(),
+                    file.task_count
+                );
+            } else if file.source_metadata_updated {
+                println!(
+                    "  {} -> {} (source/archive metadata)",
+                    file.relative_source_path.display(),
+                    file.relative_archive_path.display()
+                );
+            } else {
+                println!(
+                    "  {} -> {} (archive metadata)",
+                    file.relative_source_path.display(),
+                    file.relative_archive_path.display()
+                );
+            }
         } else {
             println!(
                 "  {} -> {} (done_tasks metadata)",
@@ -239,10 +285,17 @@ fn run_collect_done(args: Args) -> i32 {
     }
     println!("summary:");
     println!("  moved task blocks: {}", plan.total_task_count());
-    println!("  source files updated: {}", plan.files.len());
+    println!(
+        "  source files updated: {}",
+        plan.source_file_update_count()
+    );
     println!(
         "  source done_tasks updated: {}",
         plan.source_metadata_update_count()
+    );
+    println!(
+        "  archive metadata repaired: {}",
+        plan.archive_metadata_update_count()
     );
     println!("  archive files created: {archives_created}");
     println!("  archive files updated: {archives_updated}");
@@ -321,22 +374,22 @@ fn apply_file_plan(
 ) -> io::Result<Option<ArchiveWrite>> {
     let source_path = vault.join(&file.relative_source_path);
     let archive_path = vault.join(&file.relative_archive_path);
-    let archive_write = if file.writes_archive() {
-        let existing_archive = read_optional_string(&archive_path)?;
-        let archive_write = if existing_archive.is_some() {
-            ArchiveWrite::Updated
+    let archive_write =
+        if let Some(archive_contents) = file.archive_contents.as_deref() {
+            let archive_write = if archive_path.is_file() {
+                ArchiveWrite::Updated
+            } else {
+                ArchiveWrite::Created
+            };
+            atomic_write(&archive_path, archive_contents)?;
+            Some(archive_write)
         } else {
-            ArchiveWrite::Created
+            None
         };
-        let archive_contents =
-            archive_contents(existing_archive.as_deref(), &file.archive_append);
-        atomic_write(&archive_path, &archive_contents)?;
-        Some(archive_write)
-    } else {
-        None
-    };
 
-    atomic_write(&source_path, &file.source_contents)?;
+    if file.writes_source() {
+        atomic_write(&source_path, &file.source_contents)?;
+    }
 
     Ok(archive_write)
 }
@@ -398,7 +451,9 @@ fn detect_git_worktree(vault: &Path) -> Result<GitDetection, GitPrepareError> {
 fn touched_git_paths(plan: &CollectionPlan) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
     for file in &plan.files {
-        paths.insert(file.relative_source_path.clone());
+        if file.writes_source() {
+            paths.insert(file.relative_source_path.clone());
+        }
         if file.writes_archive() {
             paths.insert(file.relative_archive_path.clone());
         }
@@ -564,17 +619,28 @@ fn read_optional_string(path: &Path) -> io::Result<Option<String>> {
 fn archive_contents(
     existing_archive: Option<&str>,
     archive_append: &str,
+    source_link: &str,
 ) -> String {
-    let mut contents = match existing_archive {
-        Some(contents) => ensure_archive_frontmatter(contents),
-        None => archive_frontmatter(archive_append),
-    };
+    let mut contents =
+        archive_base_contents(existing_archive, archive_append, source_link);
     append_archive_blocks(&mut contents, archive_append);
     contents
 }
 
-fn ensure_archive_frontmatter(contents: &str) -> String {
+fn archive_base_contents(
+    existing_archive: Option<&str>,
+    sample: &str,
+    source_link: &str,
+) -> String {
+    match existing_archive {
+        Some(contents) => ensure_archive_frontmatter(contents, source_link),
+        None => archive_frontmatter(sample, source_link),
+    }
+}
+
+fn ensure_archive_frontmatter(contents: &str, source_link: &str) -> String {
     let newline = preferred_line_ending(contents);
+    let parent_line = archive_parent_frontmatter_line(source_link);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
 
     if lines
@@ -582,7 +648,7 @@ fn ensure_archive_frontmatter(contents: &str) -> String {
         .map(|line| is_frontmatter_marker(split_line_ending(line).0))
         != Some(true)
     {
-        let mut with_frontmatter = archive_frontmatter(contents);
+        let mut with_frontmatter = archive_frontmatter(contents, source_link);
         with_frontmatter.push_str(contents);
         return with_frontmatter;
     }
@@ -592,35 +658,28 @@ fn ensure_archive_frontmatter(contents: &str) -> String {
             is_frontmatter_marker(split_line_ending(line).0).then_some(index)
         })
     else {
-        let mut with_frontmatter = archive_frontmatter(contents);
+        let mut with_frontmatter = archive_frontmatter(contents, source_link);
         with_frontmatter.push_str(contents);
         return with_frontmatter;
     };
 
     let mut result = String::with_capacity(contents.len() + 64);
-    let mut parent_written = false;
 
     for (index, line) in lines.iter().enumerate() {
         if index == 0 {
             result.push_str(line);
         } else if index < closing_index {
-            let (content, ending) = split_line_ending(line);
-            if is_parent_frontmatter_line(content) {
-                result.push_str(ARCHIVE_PARENT_LINE);
-                result.push_str(if ending.is_empty() {
-                    newline
-                } else {
-                    ending
-                });
-                parent_written = true;
-            } else {
+            let (content, _) = split_line_ending(line);
+            if !is_parent_frontmatter_line(content)
+                && !is_type_frontmatter_line(content)
+            {
                 result.push_str(line);
             }
         } else if index == closing_index {
-            if !parent_written {
-                result.push_str(ARCHIVE_PARENT_LINE);
-                result.push_str(newline);
-            }
+            result.push_str(&parent_line);
+            result.push_str(newline);
+            result.push_str(ARCHIVE_TYPE_LINE);
+            result.push_str(newline);
             result.push_str(line);
         } else {
             result.push_str(line);
@@ -630,9 +689,16 @@ fn ensure_archive_frontmatter(contents: &str) -> String {
     result
 }
 
-fn archive_frontmatter(sample: &str) -> String {
+fn archive_frontmatter(sample: &str, source_link: &str) -> String {
     let newline = preferred_line_ending(sample);
-    format!("---{newline}{ARCHIVE_PARENT_LINE}{newline}---{newline}{newline}")
+    let parent_line = archive_parent_frontmatter_line(source_link);
+    format!(
+        "---{newline}{parent_line}{newline}{ARCHIVE_TYPE_LINE}{newline}---{newline}{newline}"
+    )
+}
+
+fn archive_parent_frontmatter_line(source_link: &str) -> String {
+    format!("parent: \"{source_link}\"")
 }
 
 fn ensure_source_done_tasks_frontmatter(contents: &str, link: &str) -> String {
@@ -732,6 +798,10 @@ fn is_parent_frontmatter_line(content: &str) -> bool {
     content.trim_start().starts_with("parent:")
 }
 
+fn is_type_frontmatter_line(content: &str) -> bool {
+    content.trim_start().starts_with("type:")
+}
+
 fn is_done_tasks_frontmatter_line(content: &str) -> bool {
     content.starts_with(DONE_TASKS_KEY)
 }
@@ -803,7 +873,9 @@ fn build_collection_plan(
             archive_relative_path(&relative_source_path)?;
         let transform = transform_markdown(&contents);
         let moves_tasks = transform.task_count >= threshold;
-        let archive_exists = vault.join(&relative_archive_path).is_file();
+        let archive_path = vault.join(&relative_archive_path);
+        let existing_archive = read_optional_string(&archive_path)?;
+        let archive_exists = existing_archive.is_some();
 
         let source_base = if moves_tasks {
             transform.source_contents
@@ -826,8 +898,39 @@ fn build_collection_plan(
         } else {
             String::new()
         };
+        let (archive_contents, archive_metadata_updated) =
+            if moves_tasks || archive_exists {
+                let source_link = source_wiki_link(&relative_source_path)?;
+                let archive_base = archive_base_contents(
+                    existing_archive.as_deref(),
+                    &archive_append,
+                    &source_link,
+                );
+                let archive_metadata_updated = existing_archive
+                    .as_deref()
+                    .map(|contents| archive_base != contents)
+                    .unwrap_or(false);
 
-        if task_count == 0 && !source_metadata_updated {
+                if moves_tasks || archive_metadata_updated {
+                    (
+                        Some(archive_contents(
+                            existing_archive.as_deref(),
+                            &archive_append,
+                            &source_link,
+                        )),
+                        archive_metadata_updated,
+                    )
+                } else {
+                    (None, archive_metadata_updated)
+                }
+            } else {
+                (None, false)
+            };
+
+        if task_count == 0
+            && !source_metadata_updated
+            && !archive_metadata_updated
+        {
             continue;
         }
 
@@ -836,8 +939,9 @@ fn build_collection_plan(
             relative_archive_path,
             task_count,
             source_contents,
-            archive_append,
+            archive_contents,
             source_metadata_updated,
+            archive_metadata_updated,
         });
     }
 
@@ -923,7 +1027,18 @@ fn archive_relative_path(source_relative_path: &Path) -> io::Result<PathBuf> {
 }
 
 fn archive_wiki_link(archive_relative_path: &Path) -> io::Result<String> {
-    let mut path_without_extension = archive_relative_path.to_path_buf();
+    vault_relative_wiki_link(archive_relative_path, "archive")
+}
+
+fn source_wiki_link(source_relative_path: &Path) -> io::Result<String> {
+    vault_relative_wiki_link(source_relative_path, "source")
+}
+
+fn vault_relative_wiki_link(
+    relative_path: &Path,
+    path_kind: &str,
+) -> io::Result<String> {
+    let mut path_without_extension = relative_path.to_path_buf();
     path_without_extension.set_extension("");
 
     let mut components = Vec::new();
@@ -932,8 +1047,8 @@ fn archive_wiki_link(archive_relative_path: &Path) -> io::Result<String> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "archive path is not vault-relative: {}",
-                    archive_relative_path.display()
+                    "{path_kind} path is not vault-relative: {}",
+                    relative_path.display()
                 ),
             ));
         };
@@ -941,8 +1056,8 @@ fn archive_wiki_link(archive_relative_path: &Path) -> io::Result<String> {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "archive path is not valid UTF-8: {}",
-                    archive_relative_path.display()
+                    "{path_kind} path is not valid UTF-8: {}",
+                    relative_path.display()
                 ),
             )
         })?);
@@ -1171,7 +1286,8 @@ fn print_help() {
         "\
 usage: {COMMAND_NAME} [--threshold N]
 
-Collect done and canceled Bob task blocks into archive notes, and link sources.
+Collect done and canceled Bob task blocks into archive notes, link sources,
+and repair archive metadata.
 
 options:
   -h, --help       show this help message and exit
@@ -1185,7 +1301,8 @@ mod tests {
     use super::{
         archive_contents, archive_relative_path, archive_wiki_link,
         build_collection_plan, ensure_source_done_tasks_frontmatter,
-        parse_args, transform_markdown, Args, ParseResult, DEFAULT_THRESHOLD,
+        parse_args, source_wiki_link, transform_markdown, Args, ParseResult,
+        DEFAULT_THRESHOLD,
     };
     use std::{
         ffi::OsString,
@@ -1352,14 +1469,28 @@ mod tests {
     }
 
     #[test]
+    fn maps_source_notes_to_obsidian_wiki_links() {
+        assert_eq!(
+            source_wiki_link(Path::new("obsidian.md")).unwrap(),
+            "[[obsidian]]"
+        );
+        assert_eq!(
+            source_wiki_link(Path::new("foo/bar.md")).unwrap(),
+            "[[foo/bar]]"
+        );
+    }
+
+    #[test]
     fn creates_archive_frontmatter_for_new_archive_note() {
-        let contents = archive_contents(None, "- [x] done #task\n");
+        let contents =
+            archive_contents(None, "- [x] done #task\n", "[[obsidian]]");
 
         assert_eq!(
             contents,
             "\
 ---
-parent: \"[[done]]\"
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
 ---
 
 - [x] done #task
@@ -1380,6 +1511,7 @@ title: Existing archive
 ",
             ),
             "- [-] canceled #task\n",
+            "[[obsidian]]",
         );
 
         assert_eq!(
@@ -1387,7 +1519,8 @@ title: Existing archive
             "\
 ---
 title: Existing archive
-parent: \"[[done]]\"
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
 ---
 
 - [x] old #task
@@ -1403,17 +1536,20 @@ parent: \"[[done]]\"
                 "\
 ---
 parent: \"[[old]]\"
+type: \"[[done]]\"
 ---
 ",
             ),
             "- [x] done #task\n",
+            "[[obsidian]]",
         );
 
         assert_eq!(
             contents,
             "\
 ---
-parent: \"[[done]]\"
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
 ---
 - [x] done #task
 "
@@ -1421,15 +1557,124 @@ parent: \"[[done]]\"
     }
 
     #[test]
-    fn prepends_archive_frontmatter_when_existing_note_has_none() {
-        let contents =
-            archive_contents(Some("# Archive\n"), "- [x] done #task\n");
+    fn inserts_missing_archive_type_frontmatter() {
+        let contents = archive_contents(
+            Some(
+                "\
+---
+parent: \"[[obsidian]]\"
+---
+
+- [x] old #task
+",
+            ),
+            "",
+            "[[obsidian]]",
+        );
 
         assert_eq!(
             contents,
             "\
 ---
-parent: \"[[done]]\"
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] old #task
+"
+        );
+    }
+
+    #[test]
+    fn replaces_stale_archive_type_frontmatter() {
+        let contents = archive_contents(
+            Some(
+                "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[old]]\"
+---
+",
+            ),
+            "",
+            "[[obsidian]]",
+        );
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+"
+        );
+    }
+
+    #[test]
+    fn leaves_correct_archive_frontmatter_unchanged() {
+        let original = "\
+---
+title: Existing archive
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] old #task
+";
+
+        assert_eq!(
+            archive_contents(Some(original), "", "[[obsidian]]"),
+            original
+        );
+    }
+
+    #[test]
+    fn preserves_crlf_when_repairing_archive_frontmatter() {
+        let contents = archive_contents(
+            Some("---\r\nparent: \"[[done]]\"\r\n---\r\n\r\n"),
+            "",
+            "[[obsidian]]",
+        );
+
+        assert_eq!(
+            contents,
+            "---\r\nparent: \"[[obsidian]]\"\r\ntype: \"[[done]]\"\r\n---\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn creates_archive_frontmatter_with_nested_source_parent() {
+        let contents =
+            archive_contents(None, "- [x] done #task\n", "[[foo/bar]]");
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[foo/bar]]\"
+type: \"[[done]]\"
+---
+
+- [x] done #task
+"
+        );
+    }
+
+    #[test]
+    fn prepends_archive_frontmatter_when_existing_note_has_none() {
+        let contents = archive_contents(
+            Some("# Archive\n"),
+            "- [x] done #task\n",
+            "[[obsidian]]",
+        );
+
+        assert_eq!(
+            contents,
+            "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
 ---
 
 # Archive
@@ -1579,13 +1824,52 @@ done_tasks: \"[[done/obsidian_done]]\"
 "
         );
         assert_eq!(
-            file.archive_append,
-            "\
+            file.archive_contents.as_deref(),
+            Some(
+                "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
 - [x] one #task
 - [-] two #task
 "
+            )
         );
         assert!(file.source_metadata_updated);
+        assert!(!file.archive_metadata_updated);
+    }
+
+    #[test]
+    fn task_moving_plan_writes_archive_with_nested_source_parent() {
+        let vault = TempDir::new("bob-cli-collect-done-nested-parent");
+        write_file(
+            &vault.path().join("foo/bar.md"),
+            "\
+- [x] nested #task
+- [ ] active #task
+",
+        );
+
+        let plan = build_collection_plan(vault.path(), 1).expect("build plan");
+
+        assert_eq!(plan.files.len(), 1);
+        let file = &plan.files[0];
+        assert_eq!(
+            file.archive_contents.as_deref(),
+            Some(
+                "\
+---
+parent: \"[[foo/bar]]\"
+type: \"[[done]]\"
+---
+
+- [x] nested #task
+"
+            )
+        );
+        assert!(!file.archive_metadata_updated);
     }
 
     #[test]
@@ -1647,7 +1931,14 @@ done_tasks: \"[[done/foo/bar_done]]\"
         );
         write_file(
             &vault.path().join("done/obsidian_done.md"),
-            "- [x] old #task\n",
+            "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] old #task
+",
         );
 
         let plan = build_collection_plan(vault.path(), 2).expect("build plan");
@@ -1655,8 +1946,9 @@ done_tasks: \"[[done/foo/bar_done]]\"
         assert_eq!(plan.files.len(), 1);
         let file = &plan.files[0];
         assert_eq!(file.task_count, 0);
-        assert!(file.archive_append.is_empty());
+        assert!(file.archive_contents.is_none());
         assert!(file.source_metadata_updated);
+        assert!(!file.archive_metadata_updated);
         assert_eq!(
             file.source_contents,
             "\
@@ -1667,6 +1959,53 @@ done_tasks: \"[[done/obsidian_done]]\"
 - [x] below threshold #task
 - [ ] active #task
 "
+        );
+    }
+
+    #[test]
+    fn existing_archive_with_stale_metadata_creates_archive_only_plan() {
+        let vault = TempDir::new("bob-cli-collect-done-archive-repair");
+        write_file(
+            &vault.path().join("obsidian.md"),
+            "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+",
+        );
+        write_file(
+            &vault.path().join("done/obsidian_done.md"),
+            "\
+---
+parent: \"[[done]]\"
+---
+
+- [x] old #task
+",
+        );
+
+        let plan = build_collection_plan(vault.path(), 1).expect("build plan");
+
+        assert_eq!(plan.files.len(), 1);
+        let file = &plan.files[0];
+        assert_eq!(file.task_count, 0);
+        assert!(!file.source_metadata_updated);
+        assert!(file.archive_metadata_updated);
+        assert!(!file.writes_source());
+        assert_eq!(
+            file.archive_contents.as_deref(),
+            Some(
+                "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] old #task
+"
+            )
         );
     }
 
@@ -1685,7 +2024,14 @@ done_tasks: \"[[done/obsidian_done]]\"
         );
         write_file(
             &vault.path().join("done/obsidian_done.md"),
-            "- [x] old #task\n",
+            "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] old #task
+",
         );
 
         let plan = build_collection_plan(vault.path(), 1).expect("build plan");
