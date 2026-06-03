@@ -1516,6 +1516,8 @@ fn highlights_ref_sync_supports_linked_sidecar_style() {
 > It only writes the PDF marker when frontmatter is the selected
 source and --write-pdf is supplied.
 
+- Support sase tool call replay?
+
 ***
 
 #### [Page 6](highlights://highlights-ref-sync#page=6)
@@ -1553,6 +1555,14 @@ Some note...
             "> It only writes the PDF marker when frontmatter is the selected\n> source and --write-pdf is supplied.\n"
         ),
         "{contents}"
+    );
+    assert!(
+        contents.contains("> [comment] Support sase tool call replay?\n"),
+        "{contents}"
+    );
+    assert!(
+        !contents.contains("> [comment] - Support sase tool call replay?"),
+        "linked bullet comment marker should be stripped:\n{contents}"
     );
     assert!(
         contents.contains("> Comment: Compare this with SLO notes.\n"),

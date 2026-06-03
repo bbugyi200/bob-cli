@@ -1641,10 +1641,45 @@ fn strip_comment_label(text: &str) -> String {
     let trimmed = text.trim();
     for prefix in ["Comment:", "comment:", "Note:", "note:"] {
         if let Some(value) = trimmed.strip_prefix(prefix) {
-            return value.trim_start().to_string();
+            return strip_comment_list_markers(value.trim_start());
         }
     }
-    text.to_string()
+    strip_comment_list_markers(text)
+}
+
+fn strip_comment_list_markers(text: &str) -> String {
+    if parse_marker(text).is_ok() {
+        return text.to_string();
+    }
+
+    let mut saw_list_item = false;
+    let mut stripped_lines = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            stripped_lines.push(String::new());
+            continue;
+        }
+
+        let Some(item) = strip_unordered_list_marker(line) else {
+            return text.to_string();
+        };
+        saw_list_item = true;
+        stripped_lines.push(item.to_string());
+    }
+
+    if saw_list_item {
+        stripped_lines.join("\n")
+    } else {
+        text.to_string()
+    }
+}
+
+fn strip_unordered_list_marker(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    ["- ", "* "]
+        .iter()
+        .find_map(|marker| trimmed.strip_prefix(marker))
+        .map(str::trim_start)
 }
 
 fn normalize_annotation_text(lines: &[String]) -> String {
@@ -3325,6 +3360,10 @@ Some note...
         assert!(is_sidecar_marker_mirror(&annotations[0]));
         assert_eq!(annotations[0].page_label.as_deref(), Some("Page 1"));
         assert!(annotations[0].linked_page_style);
+        assert_eq!(
+            annotations[0].comment.as_deref(),
+            Some("- status: wip\n- parent: obsidian")
+        );
 
         assert_eq!(annotations[1].kind, SidecarAnnotationKind::Highlight);
         assert_eq!(annotations[1].page_label.as_deref(), Some("Page 2"));
@@ -3341,6 +3380,59 @@ Some note...
             "Comment: Compare this with SLO notes."
         );
         assert_eq!(annotations[2].comment.as_deref(), Some("Some note..."));
+    }
+
+    #[test]
+    fn linked_sidecar_parser_strips_comment_bullet_markers() {
+        let annotations = parse_sidecar_markdown(
+            "\
+# Highlights Reference Note Sync
+
+#### [Page 2](highlights://highlights-ref-sync#page=2)
+
+##### 2026-06-03:
+
+> A determinism contract keeps replayable tool calls stable.
+
+- Support sase tool call replay?
+
+***
+
+#### [Page 3](highlights://highlights-ref-sync#page=3)
+
+##### 2026-06-03:
+
+> Multi-line bullet comments stay multiline.
+
+- Preserve the first comment line.
+- Preserve the second comment line.
+
+***
+",
+        );
+
+        assert_eq!(annotations.len(), 2);
+        assert_eq!(annotations[0].page_label.as_deref(), Some("Page 2"));
+        assert_eq!(
+            annotations[0].text,
+            "A determinism contract keeps replayable tool calls stable."
+        );
+        assert_eq!(
+            annotations[0].comment.as_deref(),
+            Some("Support sase tool call replay?")
+        );
+
+        assert_eq!(annotations[1].page_label.as_deref(), Some("Page 3"));
+        assert_eq!(
+            annotations[1].text,
+            "Multi-line bullet comments stay multiline."
+        );
+        assert_eq!(
+            annotations[1].comment.as_deref(),
+            Some(
+                "Preserve the first comment line.\nPreserve the second comment line."
+            )
+        );
     }
 
     #[test]

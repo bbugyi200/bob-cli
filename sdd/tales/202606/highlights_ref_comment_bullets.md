@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 09:14:42
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_comment_bullets.md
 ---
 # Fix Highlights Sidecar Bullet Comments

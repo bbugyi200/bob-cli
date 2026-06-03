@@ -294,6 +294,8 @@ The linked-page Highlights export shape is also supported:
   with `>`. Immediate nonblank continuation lines are kept as highlight text,
   but marker-list fields and explicit `Comment:`/`Note:` labels start the
   comment side instead.
+- User comments exported as Markdown list items after a highlight are rendered
+  without the list marker.
 - A blockquoted marker mirror title followed by marker-list fields such as
   `status` and `parent` is excluded from generated content.
 
@@ -319,6 +321,8 @@ Linked sidecar fragment:
 
 > It only writes the PDF marker when frontmatter is the selected
 source and --write-pdf is supplied.
+
+- Support sase tool call replay?
 ```
 
 The generated region is the only body region the tool owns:
