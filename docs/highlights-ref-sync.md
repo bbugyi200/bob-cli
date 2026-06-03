@@ -41,6 +41,27 @@ actions without modifying either side. Without `--dry-run`, the command writes
 the reference note when frontmatter changes. It only writes the PDF marker when
 frontmatter is the selected source and `--write-pdf` is supplied.
 
+## Release Handoff Summary
+
+The MVP is ready for Linux-side release checks and MacBook dry-run validation.
+It includes the native `bob highlights-ref` command, synthetic PDF marker
+fixtures, frontmatter/marker conflict detection, generated highlight rendering,
+recursive scan preflights, dirty target refusal, MacBook setup guidance, and
+scheduled dry-run automation examples.
+
+Known risks to validate on the MacBook:
+
+- Real Highlights sidecar Markdown may vary from the fixture-backed parser
+  contract. Keep the documented Highlights Note Format settings fixed while
+  testing.
+- PDF marker write-back is implemented with native PDF annotation writes, but
+  real Highlights-authored files may expose annotation shapes not covered by
+  Linux fixtures. Use `--write-pdf` only after backing up the target PDF.
+- Scheduled `scan` should stay note-only. Keep PDF marker write-back as a
+  targeted manual action until real-file behavior is trusted.
+- `~/bob/lib` and `~/bob/ref` are the MVP defaults even though this Linux host
+  has an observed `~/bob/lit` path.
+
 ## Default Paths
 
 The Bob vault root is `BOB_DIR`, defaulting to `~/bob`.
@@ -312,6 +333,25 @@ bob highlights-ref scan --dry-run
 bob highlights-ref sync ~/bob/lib/example.pdf --dry-run
 bob highlights-ref marker ~/bob/lib/example.pdf
 ```
+
+MacBook validation checklist:
+
+- `cargo install --path ~/projects/bob-cli --locked --force` installs the local
+  checkout.
+- `bob highlights-ref doctor` reports valid vault/library/ref paths, marker
+  readability, Git status, and optional `ob` availability.
+- `bob highlights-ref scan --dry-run` lists the expected PDFs under
+  `~/bob/lib`, reports the intended `~/bob/ref/*.md` targets, and prints
+  `writes: none`.
+- `bob highlights-ref sync ~/bob/lib/example.pdf --dry-run` shows the expected
+  marker page/note, sync source, sidecar path, note action, and no writes.
+- The first real note write creates or updates `~/bob/ref/example.md` with
+  `parent`, pipeline metadata, manual sections, and the managed Highlights
+  region.
+- A second run with unchanged inputs reports `writes: none`.
+- If frontmatter-only edits require PDF marker write-back, a targeted dry run
+  reports `pdf_marker_action: would-update` before any `--write-pdf` run.
+- `git -C ~/bob status --short` is reviewed before and after each write pass.
 
 The sync model is deliberately asymmetric:
 

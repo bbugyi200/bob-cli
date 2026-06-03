@@ -40,6 +40,7 @@ install-smoke:
     root="$(mktemp -d)"
     cargo install --path . --locked --root "${root}"
     "${root}/bin/bob" move-done-tasks --help >/dev/null
+    "${root}/bin/bob" highlights-ref --help >/dev/null
     BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "${root}/bin/bob" pomodoro >/dev/null
     BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "${root}/bin/bob" tmux-pomodoro >/dev/null
     "${root}/bin/bob_notify" --help >/dev/null

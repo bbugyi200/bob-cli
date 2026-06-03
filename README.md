@@ -29,6 +29,7 @@ To smoke-test an install without replacing an existing user install:
 root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" move-done-tasks --help
+"$root/bin/bob" highlights-ref --help
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" pomodoro
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" tmux-pomodoro
 "$root/bin/bob_notify" --help
@@ -116,8 +117,10 @@ edits back into the PDF marker. Simultaneous marker/frontmatter edits fail with
 a conflict report unless `--prefer marker` or `--prefer frontmatter` is
 supplied. `--dry-run` reports the planned note/PDF actions without writing
 either side. `marker <pdf>` inspects and renders the marker contract without
-writing. `scan` and `doctor` still report configuration only until their later
-implementation phases.
+writing. `scan` recursively processes PDFs under the configured library with
+collision and dirty-target preflights, while `doctor` checks vault paths,
+sidecars, marker readability, Git state, default parent configuration, and
+optional `ob` availability without writing files.
 
 For `foo.pdf`, `sync` discovers `foo.md` first and can parse simple
 `foo.textbundle/text.md` or `text.markdown` sidecars. Highlights, highlight
@@ -259,6 +262,7 @@ Run a local install smoke test:
 root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" move-done-tasks --help
+"$root/bin/bob" highlights-ref --help
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" pomodoro
 BOB_DAY_FILE=/tmp/bob-cli-missing-day.md "$root/bin/bob" tmux-pomodoro
 "$root/bin/bob_notify" --help

@@ -229,6 +229,56 @@ fn highlights_ref_sync_rejects_missing_marker_status_without_note_write() {
 }
 
 #[test]
+fn highlights_ref_sync_rejects_malformed_and_duplicate_marker_lists() {
+    let cases = [
+        (
+            "malformed-marker",
+            "status: reading\n",
+            "invalid marker item on line 1",
+        ),
+        (
+            "duplicate-marker-key",
+            "- status: reading\n- Status: done\n",
+            "duplicate marker key on line 2",
+        ),
+    ];
+
+    for (name, marker, expected_error) in cases {
+        let temp = TempDir::new(&format!("bob-cli-highlights-ref-{name}"));
+        let vault = temp.path().join("vault");
+        let pdf = vault.join(format!("lib/{name}.pdf"));
+        let note = vault.join(format!("ref/{name}.md"));
+        write_highlights_pdf(&pdf, marker);
+
+        let output = bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run bob highlights-ref sync for {name}: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "invalid marker should fail for {name}:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains(expected_error),
+            "expected marker validation error for {name}:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            !note.exists(),
+            "sync must not create a note for invalid marker case {name}"
+        );
+    }
+}
+
+#[test]
 fn highlights_ref_dry_run_and_inspection_do_not_modify_vault_files() {
     let temp = TempDir::new("bob-cli-highlights-ref-dry-run");
     let vault = temp.path().join("vault");
