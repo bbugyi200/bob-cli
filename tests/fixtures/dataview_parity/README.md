@@ -9,6 +9,7 @@ The fixture covers:
 - scalar, array, object, null, missing, date, datetime, duration, and link fields
 - aliases, tags, subtags, inline fields, wikilinks, incoming links, and outgoing links
 - folder, file, daily-note, task, nested-task, and task-metadata scenarios
+- overlapping folder/file source names such as `ref.md` and `ref/`
 - origin/`this` queries through `Origins/Origin.md`
 
 Keep fixture data small and stable. Add new query expectations in

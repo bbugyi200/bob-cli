@@ -1387,20 +1387,31 @@ impl NativeVault {
     }
 
     fn path_source_indices(&self, raw: &str) -> Vec<usize> {
+        if let Ok(folder) = normalize_native_source_folder(raw) {
+            let prefix = format!("{folder}/");
+            let mut indices = self
+                .index_order_indices()
+                .into_iter()
+                .filter(|index| {
+                    self.index.pages[*index].path.starts_with(&prefix)
+                })
+                .collect::<Vec<_>>();
+            if !indices.is_empty() {
+                indices.sort_by(|left, right| {
+                    source_order_key(&self.index.pages[*left].path)
+                        .cmp(&source_order_key(&self.index.pages[*right].path))
+                });
+                return indices;
+            }
+        }
+
         if let Ok(path) = normalize_note_path(raw)
             && let Some(index) = self.index.by_path.get(&path)
         {
             return vec![*index];
         }
 
-        let Ok(folder) = normalize_native_source_folder(raw) else {
-            return Vec::new();
-        };
-        let prefix = format!("{folder}/");
-        self.source_order_indices()
-            .into_iter()
-            .filter(|index| self.index.pages[*index].path.starts_with(&prefix))
-            .collect()
+        Vec::new()
     }
 
     fn incoming_link_source_indices(&self, raw: &str) -> Vec<usize> {

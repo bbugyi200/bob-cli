@@ -68,6 +68,10 @@ fn dataview_parity_fixture_vault_covers_contract_surface() {
         "People/Ada Lovelace.md",
         "People/Grace Hopper.md",
         "Tasks/Nested.md",
+        "ai_ref.md",
+        "ref.md",
+        "ref/Alpha.md",
+        "ref/Beta.md",
         ".obsidian/plugins/dataview/data.json",
     ] {
         assert!(
@@ -379,6 +383,16 @@ fn dataview_native_source_expressions_match_fixture_goldens() {
             "Projects/Alpha.md\n",
         ),
         (
+            "overlapping folder beats file",
+            &["--source", r#""ref""#],
+            "ref/Alpha.md\nref/Beta.md\n",
+        ),
+        (
+            "overlapping file remains addressable",
+            &["--source", r#""ref.md""#],
+            "ref.md\n",
+        ),
+        (
             "incoming link",
             &["--source", "[[Links/Target]]"],
             "Projects/Beta.md\nLinks/Hub.md\n",
@@ -429,6 +443,38 @@ fn dataview_native_source_expressions_match_fixture_goldens() {
             "warnings": []
         }),
     );
+}
+
+#[test]
+fn dataview_native_dql_from_ref_prefers_folder_when_note_also_exists() {
+    let output = run_native_fixture(&[
+        "--format",
+        "markdown",
+        "--query",
+        r#"LIST WITHOUT ID title + " (" + url + ")"
+FROM "ref"
+WHERE
+  source_path AND url AND (
+    parent = [[ai_ref]]
+    OR parent.parent = [[ai_ref]]
+    OR parent.parent.parent = [[ai_ref]]
+    OR parent.parent.parent.parent = [[ai_ref]]
+    OR parent.parent.parent.parent.parent = [[ai_ref]]
+  )
+SORT title"#,
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "- Alpha Reference (https://example.test/alpha-reference)\n",
+            "- Beta Reference (https://example.test/beta-reference)\n",
+        ),
+        "native DQL FROM \"ref\" should select folder rows, not ref.md:\n{}",
+        format_output(&output)
+    );
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 19:22:57
-status: wip
+status: done
 prompt: sdd/prompts/202606/native_dataview_folder_source_parity.md
 ---
 # Native Dataview Folder Source Parity
