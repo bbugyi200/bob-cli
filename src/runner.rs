@@ -43,6 +43,12 @@ const SUBCOMMANDS: &[Subcommand] = &[
         native_command: NativeCommand::Cronjob,
     },
     Subcommand {
+        name: "dataview",
+        script_command: None,
+        about: "Run Dataview queries against the Bob vault",
+        native_command: NativeCommand::Dataview,
+    },
+    Subcommand {
         name: "highlights-ref",
         script_command: None,
         about: "Sync Highlights PDF annotations into reference notes",
@@ -209,6 +215,8 @@ const AFTER_HELP: &str = "\
 Examples:
   bob bulk-git-commit             Commit and push Bob vault Git changes
   bob cronjob                    Run the nightly sync and maintenance steps
+  bob dataview --source '#project'
+                                 Print matching note paths
   bob highlights-ref scan --dry-run
                                  Preview Highlights reference note sync
   bob move-done-tasks --threshold 10

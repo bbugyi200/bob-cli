@@ -112,6 +112,30 @@ fn bulk_git_commit_help_is_native_only() {
 }
 
 #[test]
+fn dataview_help_is_native_only() {
+    let temp = TempDir::new("bob-cli-dataview-native-help");
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--help")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env("XDG_CACHE_HOME", temp.path())
+        .output()
+        .expect("run native-only bob dataview --help");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("bob dataview"),
+        "expected dataview help text:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !temp.path().join("bob-cli/scripts").exists(),
+        "native-only dataview should not extract script assets"
+    );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
 fn highlights_ref_help_is_native_only() {
     let temp = TempDir::new("bob-cli-highlights-ref-native-help");
     let output = bob_command()
@@ -169,6 +193,7 @@ fn all_top_level_subcommand_help_is_safe_and_plain() {
     let cases: &[(&[&str], &str)] = &[
         (&["bulk-git-commit", "--help"], "usage: bob bulk-git-commit"),
         (&["cronjob", "--help"], "usage: bob cronjob"),
+        (&["dataview", "--help"], "bob dataview"),
         (&["highlights-ref", "--help"], "Usage: bob highlights-ref"),
         (&["move-done-tasks", "--help"], "usage: bob move-done-tasks"),
         (&["notify", "--help"], "Notify me when"),
@@ -352,6 +377,141 @@ fn cronjob_help_exits_before_operational_work() {
         fs::read_to_string(&log).unwrap_or_default()
     );
     assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
+fn dataview_help_lists_options_alphabetically() {
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--help")
+        .output()
+        .expect("run bob dataview --help");
+
+    assert_success(&output);
+    let help = stdout(&output);
+    assert_text_order(
+        &help,
+        &[
+            "\n      --bob-dir ",
+            "\n      --engine ",
+            "\n      --format ",
+            "\n      --origin ",
+            "\n      --query ",
+            "\n      --query-file ",
+            "\n      --source ",
+            "\n      --strict-paths",
+            "\n      --sync",
+            "\n      --vault ",
+        ],
+    );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
+fn dataview_rejects_invalid_argument_combinations() {
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["dataview", "--source", "#project", "--query", "LIST"],
+            "cannot be used with",
+        ),
+        (
+            &["dataview", "--source", "#project", "--format", "markdown"],
+            "--format markdown requires a DQL query",
+        ),
+        (
+            &[
+                "dataview",
+                "--query",
+                "LIST FROM #project",
+                "--format",
+                "json",
+                "--strict-paths",
+            ],
+            "--strict-paths can only be used with --format paths",
+        ),
+    ];
+
+    for (args, marker) in cases {
+        let output = bob_command()
+            .args(*args)
+            .output()
+            .unwrap_or_else(|error| panic!("run bob {args:?}: {error}"));
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "invalid dataview args should fail with usage:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains(marker),
+            "expected `{marker}` in dataview validation error:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            !stderr(&output).contains("engine execution is not implemented"),
+            "validation must fail before execution:\n{}",
+            format_output(&output)
+        );
+    }
+}
+
+#[test]
+fn dataview_valid_query_reports_temporary_engine_stub() {
+    let temp = TempDir::new("bob-cli-dataview-stub");
+    let stub_bin = temp.path().join("bin");
+    let vault = temp.path().join("vault");
+    let log = temp.path().join("commands.log");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_executable(
+        &stub_bin.join("ob"),
+        "#!/bin/sh\nprintf 'ob %s\\n' \"$*\" >> \"$STUB_LOG\"\nexit 99\n",
+    );
+    write_executable(
+        &stub_bin.join("obsidian"),
+        "#!/bin/sh\nprintf 'obsidian %s\\n' \"$*\" >> \"$STUB_LOG\"\nexit 99\n",
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--query")
+        .arg("LIST FROM #project")
+        .arg("--sync")
+        .env("BOB_DATAVIEW_VAULT", "Bob")
+        .env("BOB_DIR", &vault)
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run bob dataview query");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "temporary dataview stub should fail:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output).is_empty(),
+        "temporary dataview stub must keep stdout clean:\n{}",
+        format_output(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("engine execution is not implemented yet")
+            && err.contains("engine: obsidian")
+            && err.contains("query: inline DQL")
+            && err.contains("format: paths")
+            && err.contains("vault: Bob")
+            && err.contains("sync: true"),
+        "expected temporary dataview execution report:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !log.exists(),
+        "phase 1 dataview stub must not run external commands:\n{}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
 }
 
 #[test]
@@ -2908,6 +3068,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     let order = [
         "bulk-git-commit",
         "cronjob",
+        "dataview",
         "highlights-ref",
         "move-done-tasks",
         "notify",
@@ -2930,6 +3091,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     assert!(
         help.contains("Examples:")
             && help.contains("bob bulk-git-commit")
+            && help.contains("bob dataview --source '#project'")
             && help.contains("bob move-done-tasks --threshold 10")
             && help.contains("bob pomodoro"),
         "expected an Examples section:\n{help}"

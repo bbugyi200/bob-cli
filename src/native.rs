@@ -2,6 +2,7 @@ use std::ffi::OsString;
 
 mod collect_done;
 mod cronjob;
+mod dataview;
 mod env;
 mod highlights_ref;
 mod notify;
@@ -13,6 +14,7 @@ mod sync;
 pub(crate) enum NativeCommand {
     BulkGitCommit,
     Cronjob,
+    Dataview,
     HighlightsRef,
     MoveDoneTasks,
     Pomodoro,
@@ -36,6 +38,7 @@ pub(crate) fn run(command: NativeCommand, args: Vec<OsString>) -> i32 {
     match command {
         NativeCommand::BulkGitCommit => sync::run(args),
         NativeCommand::Cronjob => cronjob::run(args),
+        NativeCommand::Dataview => dataview::run(args),
         NativeCommand::HighlightsRef => highlights_ref::run(args),
         NativeCommand::MoveDoneTasks => collect_done::run(args),
         NativeCommand::Pomodoro => pomodoro::run(args),
