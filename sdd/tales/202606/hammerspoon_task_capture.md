@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 11:33:25
-status: wip
+status: done
 prompt: sdd/prompts/202606/hammerspoon_task_capture.md
 ---
 # Fix Hammerspoon Task Capture Nested-Content Insertion
