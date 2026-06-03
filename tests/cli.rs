@@ -408,7 +408,7 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
     let note = vault.join("ref/systems-performance.md");
     write_highlights_pdf(
         &pdf,
-        "- status: wip\n- parent: [[obsidian]]\n- title: Systems Performance\n- topics: [linux, performance]\n",
+        "- status: wip\n- parent: obsidian\n- title: Systems Performance\n- topics: [linux, performance]\n",
     );
 
     let output = bob_command()
@@ -440,6 +440,44 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
         "{contents}"
     );
     assert!(contents.contains("highlights_marker_hash: "), "{contents}");
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("repeat bob highlights-ref sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "bare marker parent should be idempotent:\n{}",
+        format_output(&output)
+    );
+
+    let edited = fs::read_to_string(&note)
+        .expect("read generated ref note")
+        .replace("parent: \"[[obsidian]]\"\n", "parent: obsidian\n");
+    write_file(&note, &edited);
+    let marker_before = pdf_marker_contents(&pdf);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync bare frontmatter parent");
+
+    assert_success(&output);
+    let contents = fs::read_to_string(&note).expect("read normalized ref note");
+    assert!(
+        contents.contains("parent: \"[[obsidian]]\"\n"),
+        "{contents}"
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
 }
 
 #[test]

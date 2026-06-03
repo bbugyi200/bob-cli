@@ -97,7 +97,7 @@ The marker note is an unordered list of `key: value` pairs:
 
 ```text
 - status: wip
-- parent: [[obsidian]]
+- parent: obsidian
 - title: Systems Performance
 - aliases: ["Systems Performance", "Brendan Gregg systems performance"]
 - topics: [linux, performance]
@@ -111,7 +111,10 @@ Allowed list markers:
 * key: value
 ```
 
-`status` and `parent` are required marker keys.
+`status` and `parent` are required marker keys. `parent` may be a bare note
+target such as `obsidian` or `Systems Performance`; existing wikilinks such as
+`[[obsidian]]` are also accepted. Generated reference notes render `parent` as
+an Obsidian wikilink.
 
 Values should be parsed as a YAML-compatible subset when possible:
 
@@ -320,7 +323,7 @@ Use this marker as a starting point:
 
 ```text
 - status: wip
-- parent: [[obsidian]]
+- parent: obsidian
 - title: Example Title
 - topics: [example]
 ```
@@ -571,7 +574,7 @@ Common failure snippets and fixes:
 | `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
 | `no standalone /Text note annotations found` | The PDF has no standalone marker note. | Add the first standalone PDF note in Highlights. |
 | `missing required marker key: status` | The marker list lacks `status`. | Add `- status: wip` to the marker. |
-| `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add `- parent: [[...]]` to the marker or frontmatter source. |
+| `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add `- parent: obsidian` to the marker or frontmatter source; `[[obsidian]]` is also accepted. |
 | `'type' is command-managed` | The marker tries to set the generated note `type`. | Remove `type` from the marker; generated notes get `type: "[[ref]]"` automatically. |
 | `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |
 | `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |

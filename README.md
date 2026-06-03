@@ -127,7 +127,8 @@ either side. `marker <pdf>` inspects and renders the marker contract without
 writing. `scan` recursively processes PDFs under the configured library with
 collision and dirty-target preflights, while `doctor` checks vault paths,
 sidecars, marker readability, Git state, and optional `ob` availability without
-writing files. Marker notes must include `status` and `parent`; generated
+writing files. Marker notes must include `status` and `parent`; `parent` may be
+a bare note target such as `obsidian` or an existing wikilink. Generated
 reference notes always include `type: "[[ref]]"`.
 
 For `foo.pdf`, `sync` discovers `foo.md` first and can parse simple

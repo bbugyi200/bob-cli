@@ -375,7 +375,7 @@ fn plan_pdf_sync(
     let note_path = ref_note_path(config, pdf)?;
     validate_note_target(&note_path)?;
     let note = read_note(&note_path)?;
-    let frontmatter_projection = note.synced_projection();
+    let frontmatter_projection = note.synced_projection()?;
     let marker_hash = projection_hash(&marker_projection)?;
     let frontmatter_hash = projection_hash(&frontmatter_projection)?;
     let last_hash = note.marker_hash();
@@ -1000,6 +1000,51 @@ fn command_output(output: &Output) -> String {
 fn is_wikilink(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with("[[") && trimmed.ends_with("]]")
+}
+
+fn canonicalize_parent(
+    projection: &mut Projection,
+    source: &str,
+) -> Result<()> {
+    let Some(value) = projection.get_mut(FIELD_PARENT) else {
+        return Ok(());
+    };
+
+    let canonical = match value {
+        MarkerValue::String(value) | MarkerValue::Number(value) => {
+            canonical_parent_target(value, source)?
+        }
+        MarkerValue::Bool(value) => {
+            canonical_parent_target(&value.to_string(), source)?
+        }
+        MarkerValue::Null => return Err(empty_parent_error(source)),
+        MarkerValue::List(_) => {
+            return Err(CommandError::new(format!(
+                "{source} parent must be a scalar note target; inline lists are not supported"
+            )));
+        }
+    };
+
+    *value = MarkerValue::String(canonical);
+    Ok(())
+}
+
+fn canonical_parent_target(value: &str, source: &str) -> Result<String> {
+    let target = value.trim();
+    if target.is_empty() {
+        return Err(empty_parent_error(source));
+    }
+    if is_wikilink(target) {
+        Ok(target.to_string())
+    } else {
+        Ok(format!("[[{target}]]"))
+    }
+}
+
+fn empty_parent_error(source: &str) -> CommandError {
+    CommandError::new(format!(
+        "{source} has an empty required marker key: {FIELD_PARENT}"
+    ))
 }
 
 fn read_sidecar_for_pdf(pdf: &Path) -> Result<Option<SidecarInput>> {
@@ -1758,7 +1803,7 @@ impl ParsedNote {
         })
     }
 
-    fn synced_projection(&self) -> Projection {
+    fn synced_projection(&self) -> Result<Projection> {
         let marker_fields = self.marker_fields();
         let mut projection = Projection::new();
 
@@ -1776,7 +1821,8 @@ impl ParsedNote {
             }
         }
 
-        projection
+        canonicalize_parent(&mut projection, "frontmatter")?;
+        Ok(projection)
     }
 
     fn render_with_projection(
@@ -2309,6 +2355,7 @@ fn parse_marker(contents: &str) -> Result<Projection> {
         projection.insert(key, parse_value(value));
     }
 
+    canonicalize_parent(&mut projection, "marker")?;
     validate_required_marker_keys(&projection, "marker")?;
     Ok(projection)
 }
@@ -2820,6 +2867,102 @@ mod tests {
     }
 
     #[test]
+    fn marker_parser_canonicalizes_parent_targets() {
+        let bare = parse_marker("- status: wip\n- parent: obsidian\n")
+            .expect("parse bare parent marker");
+        assert_eq!(
+            bare.get("parent"),
+            Some(&MarkerValue::String("[[obsidian]]".to_string()))
+        );
+
+        let nested = parse_marker("- status: wip\n- parent: projects/foo\n")
+            .expect("parse nested parent marker");
+        assert_eq!(
+            nested.get("parent"),
+            Some(&MarkerValue::String("[[projects/foo]]".to_string()))
+        );
+
+        let spaced =
+            parse_marker("- status: wip\n- parent: Systems Performance\n")
+                .expect("parse spaced parent marker");
+        assert_eq!(
+            spaced.get("parent"),
+            Some(&MarkerValue::String("[[Systems Performance]]".to_string()))
+        );
+
+        let linked =
+            parse_marker("- status: wip\n- parent: [[obsidian|Obsidian]]\n")
+                .expect("parse linked parent marker");
+        assert_eq!(
+            linked.get("parent"),
+            Some(&MarkerValue::String("[[obsidian|Obsidian]]".to_string()))
+        );
+    }
+
+    #[test]
+    fn frontmatter_projection_canonicalizes_parent_targets() {
+        let note = parse_note(
+            "\
+---
+status: wip
+parent: obsidian
+---
+
+Body
+",
+        );
+        let projection = note
+            .synced_projection()
+            .expect("extract frontmatter projection");
+        assert_eq!(
+            projection.get("parent"),
+            Some(&MarkerValue::String("[[obsidian]]".to_string()))
+        );
+
+        let marker_projection =
+            parse_marker("- status: wip\n- parent: [[obsidian]]\n")
+                .expect("parse marker");
+        let marker_hash =
+            projection_hash(&marker_projection).expect("hash marker");
+        let frontmatter_hash =
+            projection_hash(&projection).expect("hash frontmatter");
+        assert_eq!(marker_hash, frontmatter_hash);
+    }
+
+    #[test]
+    fn parent_canonicalization_rejects_non_scalar_values() {
+        let marker_error =
+            parse_marker("- status: wip\n- parent: [obsidian]\n")
+                .expect_err("list parent marker should fail");
+        assert!(
+            marker_error
+                .to_string()
+                .contains("marker parent must be a scalar note target"),
+            "{marker_error}"
+        );
+
+        let note = parse_note(
+            "\
+---
+status: wip
+parent: [obsidian]
+---
+
+Body
+",
+        );
+        let frontmatter_error = note
+            .synced_projection()
+            .expect_err("list parent frontmatter should fail");
+        assert!(
+            frontmatter_error
+                .to_string()
+                .contains("frontmatter parent must be a scalar note target"),
+            "{frontmatter_error}"
+        );
+    }
+
+    #[test]
     fn marker_parser_rejects_missing_required_keys_type_and_duplicate_status() {
         let missing = parse_marker("- title: Missing\n")
             .expect_err("missing status should fail");
@@ -2894,7 +3037,9 @@ Body
 ",
         );
 
-        let projection = note.synced_projection();
+        let projection = note
+            .synced_projection()
+            .expect("extract frontmatter projection");
         assert!(!projection.contains_key("parent"));
         assert!(!projection.contains_key("type"));
         assert_eq!(

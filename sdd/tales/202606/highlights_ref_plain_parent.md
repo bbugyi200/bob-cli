@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 06:55:06
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_plain_parent.md
 ---
 # Highlights Ref Plain Parent Marker Plan
