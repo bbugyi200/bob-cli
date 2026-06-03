@@ -17,7 +17,8 @@ Run a source query and print one vault-relative Markdown path per matching note:
 bob dataview --source '#project and -"archive"'
 ```
 
-Run DQL and print source note paths. `paths` is the default format:
+Run DQL and print source note paths. `paths` is the default format, including
+for `TABLE` queries:
 
 ```bash
 bob dataview --query 'LIST FROM #waiting'
@@ -31,7 +32,7 @@ bob dataview --format json --query 'TABLE status, due FROM #project'
 bob dataview --format json --query-file ~/queries/projects.dql | jq '.paths'
 ```
 
-Render Dataview Markdown through Obsidian. Markdown output requires DQL:
+Render a visible Dataview table through Obsidian. Markdown output requires DQL:
 
 ```bash
 bob dataview --format markdown --origin Home.md --query 'TABLE file.link FROM #project'
@@ -56,7 +57,9 @@ The path is validated when it is supplied explicitly or when the `dynomark` or
 on a running Obsidian app.
 
 `--format <paths|json|markdown>` selects the output format. `paths` is the
-default. `markdown` requires a DQL query and the Obsidian engine.
+default and prints matching source note paths for DQL `LIST` and `TABLE`
+queries. Use `json` for structured rows and `markdown` with the Obsidian engine
+for rendered Dataview tables.
 
 `--origin <VAULT_RELATIVE_PATH>` sets the origin note for Dataview `this` and
 relative links. It must be vault-relative; absolute paths and `..` traversal are
@@ -155,10 +158,15 @@ WHERE source_pdf
 '
 ```
 
-The native engine supports `LIST` queries with an optional quoted folder source
-such as `FROM "ref"`, plus `WHERE` expressions made from field truthiness,
+The native engine supports `LIST` queries and limited `TABLE field,
+parent.field` projections with an optional quoted folder source such as
+`FROM "ref"`, plus `WHERE` expressions made from field truthiness,
 `field = [[wikilink]]`, string/boolean comparisons, `AND`, `OR`, and
 parentheses. Chained fields such as `parent.parent` resolve each intermediate
-frontmatter value as an Obsidian wikilink or bare note target. It supports
-`paths` and `json` output; source expressions and rendered Markdown remain
-Obsidian-only.
+frontmatter value as an Obsidian wikilink or bare note target.
+
+Native `paths` output prints matching source note paths for both `LIST` and
+`TABLE`. Native `json` output keeps `LIST` results list-shaped and emits
+`TABLE` results with `type`, `headers`, and row `values`; missing fields become
+`null`. Rendered Markdown remains Obsidian-only, so use `--engine obsidian
+--format markdown` when you want Dataview's Markdown table rendering.

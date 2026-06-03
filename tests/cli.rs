@@ -1257,36 +1257,7 @@ fn dataview_dynomark_reports_missing_command() {
 fn dataview_native_dql_paths_walks_parent_frontmatter_headlessly() {
     let temp = TempDir::new("bob-cli-dataview-native-parents");
     let vault = temp.path().join("vault");
-    write_file(&vault.join("ai_ref.md"), "---\n---\n");
-    write_file(&vault.join("sase.md"), "---\nparent: \"[[tools]]\"\n---\n");
-    write_file(
-        &vault.join("agent_ref.md"),
-        "---\nparent: \"[[ai_ref]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("memory_ref.md"),
-        "---\nparent: \"[[agent_ref]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("ref/papers/direct_ai.md"),
-        "---\nsource_pdf: lib/papers/direct-ai.pdf\nparent: \"[[ai_ref]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("ref/papers/memory_os.md"),
-        "---\nsource_pdf: lib/papers/memory-os.pdf\nparent: \"[[memory_ref]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("ref/papers/log_is_the_agent.md"),
-        "---\nsource_pdf: lib/papers/log-is-the-agent.pdf\nparent: \"[[sase]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("ref/chat/obsidian-note-refactor.md"),
-        "---\nsource_pdf: lib/chat/obsidian-note-refactor.pdf\nparent: \"[[obsidian]]\"\n---\n",
-    );
-    write_file(
-        &vault.join("ref/papers/not_a_pdf.md"),
-        "---\nparent: \"[[memory_ref]]\"\n---\n",
-    );
+    write_native_parent_chain_fixture(&vault);
     let query = r#"
 LIST
 FROM "ref"
@@ -1324,6 +1295,139 @@ WHERE source_pdf
         "native engine should keep stderr clean for supported queries:\n{}",
         format_output(&output)
     );
+}
+
+#[test]
+fn dataview_native_table_paths_match_list_rows_headlessly() {
+    let temp = TempDir::new("bob-cli-dataview-native-table-paths");
+    let vault = temp.path().join("vault");
+    write_native_parent_chain_fixture(&vault);
+    let query_tail = r#"
+FROM "ref"
+WHERE source_pdf
+  AND (
+    parent = [[ai_ref]]
+    OR parent.parent = [[ai_ref]]
+    OR parent.parent.parent = [[ai_ref]]
+    OR parent.parent.parent.parent = [[ai_ref]]
+    OR parent.parent.parent.parent.parent = [[ai_ref]]
+  )
+"#;
+    let list_query = format!("LIST\n{query_tail}");
+    let table_query =
+        format!("TABLE status, parent, source_path\n{query_tail}");
+
+    let list_output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--engine")
+        .arg("native")
+        .arg("--strict-paths")
+        .arg("--query")
+        .arg(&list_query)
+        .output()
+        .expect("run native dataview list parent query");
+    let table_output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--engine")
+        .arg("native")
+        .arg("--strict-paths")
+        .arg("--query")
+        .arg(&table_query)
+        .output()
+        .expect("run native dataview table parent query");
+
+    assert_success(&list_output);
+    assert_success(&table_output);
+    assert_eq!(
+        stdout(&table_output),
+        stdout(&list_output),
+        "native TABLE paths should match equivalent LIST rows:\nLIST:\n{}\nTABLE:\n{}",
+        format_output(&list_output),
+        format_output(&table_output)
+    );
+    assert_eq!(
+        stdout(&table_output),
+        "ref/papers/direct_ai.md\nref/papers/memory_os.md\n"
+    );
+    assert!(
+        stderr(&list_output).is_empty() && stderr(&table_output).is_empty(),
+        "native table/list paths should keep stderr clean:\nLIST:\n{}\nTABLE:\n{}",
+        format_output(&list_output),
+        format_output(&table_output)
+    );
+}
+
+#[test]
+fn dataview_native_table_json_projects_frontmatter_rows() {
+    let temp = TempDir::new("bob-cli-dataview-native-table-json");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("ref/alpha.md"),
+        "---\nstatus: active\nparent: \"[[memory_ref]]\"\nready: true\n---\n",
+    );
+    write_file(
+        &vault.join("ref/beta.md"),
+        "---\nparent: null\nready: false\n---\n",
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--engine")
+        .arg("native")
+        .arg("--format")
+        .arg("json")
+        .arg("--query")
+        .arg("TABLE status, parent, ready, missing FROM \"ref\"")
+        .output()
+        .expect("run native dataview table JSON query");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "native JSON TABLE query should keep stderr clean:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["engine"], "native");
+    assert_eq!(json["query_kind"], "dql");
+    assert_eq!(json["format"], "json");
+    assert_eq!(
+        json["paths"],
+        serde_json::json!(["ref/alpha.md", "ref/beta.md"])
+    );
+    assert_eq!(json["result"]["type"], "table");
+    assert_eq!(
+        json["result"]["headers"],
+        serde_json::json!(["status", "parent", "ready", "missing"])
+    );
+    let values = json["result"]["values"]
+        .as_array()
+        .expect("table values array");
+    assert_eq!(values.len(), 2, "expected two table rows:\n{json}");
+    assert_eq!(values[0][0], "active");
+    assert_eq!(
+        values[0][1],
+        serde_json::json!({
+            "type": "link",
+            "path": "memory_ref.md",
+            "display": null,
+            "embed": false
+        })
+    );
+    assert_eq!(values[0][2], true);
+    assert!(values[0][3].is_null(), "missing field should be null");
+    assert!(values[1][0].is_null(), "missing field should be null");
+    assert!(values[1][1].is_null(), "frontmatter null should be null");
+    assert_eq!(values[1][2], false);
 }
 
 #[test]
@@ -4537,6 +4641,39 @@ fn write_obsidian_success_stub(path: &Path, payload: &str) {
              printf '%s\\n' {sentinel_line}\n\
              printf 'plugin log after\\n'\n"
         ),
+    );
+}
+
+fn write_native_parent_chain_fixture(vault: &Path) {
+    write_file(&vault.join("ai_ref.md"), "---\n---\n");
+    write_file(&vault.join("sase.md"), "---\nparent: \"[[tools]]\"\n---\n");
+    write_file(
+        &vault.join("agent_ref.md"),
+        "---\nparent: \"[[ai_ref]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("memory_ref.md"),
+        "---\nparent: \"[[agent_ref]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("ref/papers/direct_ai.md"),
+        "---\nsource_pdf: lib/papers/direct-ai.pdf\nsource_path: lib/papers/direct-ai.pdf\nstatus: direct\nparent: \"[[ai_ref]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("ref/papers/memory_os.md"),
+        "---\nsource_pdf: lib/papers/memory-os.pdf\nsource_path: lib/papers/memory-os.pdf\nstatus: inherited\nparent: \"[[memory_ref]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("ref/papers/log_is_the_agent.md"),
+        "---\nsource_pdf: lib/papers/log-is-the-agent.pdf\nsource_path: lib/papers/log-is-the-agent.pdf\nstatus: other\nparent: \"[[sase]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("ref/chat/obsidian-note-refactor.md"),
+        "---\nsource_pdf: lib/chat/obsidian-note-refactor.pdf\nsource_path: lib/chat/obsidian-note-refactor.pdf\nstatus: other\nparent: \"[[obsidian]]\"\n---\n",
+    );
+    write_file(
+        &vault.join("ref/papers/not_a_pdf.md"),
+        "---\nstatus: inherited\nparent: \"[[memory_ref]]\"\n---\n",
     );
 }
 

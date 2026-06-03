@@ -636,27 +636,32 @@ fn emit_native_output(
             Ok(())
         }
         OutputFormat::Json => {
-            let values = output
-                .paths
-                .iter()
-                .map(|path| {
+            let result = match output.result {
+                NativeResult::List => {
+                    let values = output
+                        .paths
+                        .iter()
+                        .map(|path| native_link_json_for_path(path))
+                        .collect::<Vec<_>>();
                     serde_json::json!({
-                        "type": "link",
-                        "path": path,
-                        "display": null,
-                        "embed": false,
+                        "type": "list",
+                        "values": values,
                     })
-                })
-                .collect::<Vec<_>>();
+                }
+                NativeResult::Table { headers, values } => {
+                    serde_json::json!({
+                        "type": "table",
+                        "headers": headers,
+                        "values": values,
+                    })
+                }
+            };
             print_json(serde_json::json!({
                 "engine": request.engine.as_str(),
                 "query_kind": "dql",
                 "format": request.format.as_str(),
                 "paths": output.paths,
-                "result": {
-                    "type": "list",
-                    "values": values,
-                },
+                "result": result,
                 "warnings": [],
             }))
         }
@@ -737,12 +742,29 @@ struct DynomarkOutput {
 #[derive(Debug)]
 struct NativeOutput {
     paths: Vec<String>,
+    result: NativeResult,
+}
+
+#[derive(Debug)]
+enum NativeResult {
+    List,
+    Table {
+        headers: Vec<String>,
+        values: Vec<Vec<Value>>,
+    },
 }
 
 #[derive(Debug)]
 struct NativeQuery {
+    kind: NativeQueryKind,
     source: Option<NativeSource>,
     filter: Option<NativeExpr>,
+}
+
+#[derive(Debug)]
+enum NativeQueryKind {
+    List,
+    Table { columns: Vec<Vec<String>> },
 }
 
 #[derive(Debug)]
@@ -790,6 +812,7 @@ enum NativeFieldValue {
 enum NativeToken {
     And,
     Bool(bool),
+    Comma,
     Dot,
     Equal,
     Eof,
@@ -801,6 +824,7 @@ enum NativeToken {
     Or,
     RParen,
     String(String),
+    Table,
     Where,
 }
 
@@ -863,16 +887,42 @@ impl NativeVault {
     }
 
     fn evaluate(&self, query: &NativeQuery) -> NativeOutput {
-        let paths = self
+        let page_indices = self
             .pages
             .iter()
             .enumerate()
             .filter(|(_, page)| query.matches_source(page))
             .filter(|(index, _)| query.matches_filter(self, *index))
-            .map(|(_, page)| page.path.clone())
-            .collect();
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let paths = page_indices
+            .iter()
+            .map(|index| self.pages[*index].path.clone())
+            .collect::<Vec<_>>();
+        let result = match &query.kind {
+            NativeQueryKind::List => NativeResult::List,
+            NativeQueryKind::Table { columns } => NativeResult::Table {
+                headers: columns
+                    .iter()
+                    .map(|column| column.join("."))
+                    .collect(),
+                values: page_indices
+                    .iter()
+                    .map(|page_index| {
+                        columns
+                            .iter()
+                            .map(|column| {
+                                self.field_chain_value(*page_index, column)
+                                    .map(native_field_value_to_json)
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            },
+        };
 
-        NativeOutput { paths }
+        NativeOutput { paths, result }
     }
 
     fn field_chain_value(
@@ -1013,6 +1063,33 @@ impl NativeFieldValue {
     }
 }
 
+fn native_field_value_to_json(value: &NativeFieldValue) -> Value {
+    match value {
+        NativeFieldValue::Bool(value) => Value::Bool(*value),
+        NativeFieldValue::Null => Value::Null,
+        NativeFieldValue::String(value) => native_wikilink_json(value)
+            .unwrap_or_else(|| Value::String(value.clone())),
+    }
+}
+
+fn native_wikilink_json(raw: &str) -> Option<Value> {
+    if !raw.trim_start().starts_with("[[") {
+        return None;
+    }
+    let target = native_link_target(raw)?;
+    let path = normalize_note_path(&target).ok()?;
+    Some(native_link_json_for_path(&path))
+}
+
+fn native_link_json_for_path(path: &str) -> Value {
+    serde_json::json!({
+        "type": "link",
+        "path": path,
+        "display": null,
+        "embed": false,
+    })
+}
+
 struct NativeLexer<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
 }
@@ -1031,6 +1108,7 @@ impl<'a> NativeLexer<'a> {
                 ch if ch.is_whitespace() => {}
                 '(' => tokens.push(NativeToken::LParen),
                 ')' => tokens.push(NativeToken::RParen),
+                ',' => tokens.push(NativeToken::Comma),
                 '.' => tokens.push(NativeToken::Dot),
                 '=' => tokens.push(NativeToken::Equal),
                 '"' => tokens
@@ -1048,8 +1126,9 @@ impl<'a> NativeLexer<'a> {
                 other => {
                     return Err(format!(
                         "unsupported token {other:?}; native engine supports \
-                         LIST, FROM, WHERE, AND, OR, parentheses, field \
-                         names, strings, booleans, and wikilinks"
+                         LIST, TABLE, FROM, WHERE, AND, OR, parentheses, \
+                         comma-separated table fields, field names, strings, \
+                         booleans, and wikilinks"
                     ));
                 }
             }
@@ -1126,7 +1205,7 @@ impl NativeParser {
     }
 
     fn parse_query(&mut self) -> Result<NativeQuery, String> {
-        self.expect_list()?;
+        let kind = self.parse_query_kind()?;
         let source = if self.take_from() {
             Some(NativeSource {
                 folder: normalize_native_source_folder(
@@ -1142,7 +1221,11 @@ impl NativeParser {
             None
         };
         self.expect_eof()?;
-        Ok(NativeQuery { source, filter })
+        Ok(NativeQuery {
+            kind,
+            source,
+            filter,
+        })
     }
 
     fn parse_expr(&mut self) -> Result<NativeExpr, String> {
@@ -1230,15 +1313,25 @@ impl NativeParser {
         }
     }
 
-    fn expect_list(&mut self) -> Result<(), String> {
-        if matches!(self.peek(), NativeToken::List) {
-            self.position += 1;
-            return Ok(());
+    fn parse_query_kind(&mut self) -> Result<NativeQueryKind, String> {
+        match self.peek() {
+            NativeToken::List => {
+                self.position += 1;
+                Ok(NativeQueryKind::List)
+            }
+            NativeToken::Table => {
+                self.position += 1;
+                let mut columns = vec![self.parse_field_chain()?];
+                while self.take_comma() {
+                    columns.push(self.parse_field_chain()?);
+                }
+                Ok(NativeQueryKind::Table { columns })
+            }
+            token => Err(format!(
+                "native engine supports LIST and limited TABLE queries; found {}",
+                native_token_name(token)
+            )),
         }
-        Err(format!(
-            "native engine supports LIST queries only; found {}",
-            native_token_name(self.peek())
-        ))
     }
 
     fn take_from(&mut self) -> bool {
@@ -1259,6 +1352,10 @@ impl NativeParser {
 
     fn take_dot(&mut self) -> bool {
         self.take(|token| matches!(token, NativeToken::Dot))
+    }
+
+    fn take_comma(&mut self) -> bool {
+        self.take(|token| matches!(token, NativeToken::Comma))
     }
 
     fn take_equal(&mut self) -> bool {
@@ -1316,7 +1413,7 @@ impl NativeParser {
         }
         Err(format!(
             "unexpected {} after native query; native engine supports LIST \
-             FROM \"folder\" WHERE <expression>",
+             or TABLE <fields> FROM \"folder\" WHERE <expression>",
             native_token_name(self.peek())
         ))
     }
@@ -1553,6 +1650,7 @@ fn native_identifier_token(identifier: String) -> NativeToken {
         "from" => NativeToken::From,
         "list" => NativeToken::List,
         "or" => NativeToken::Or,
+        "table" => NativeToken::Table,
         "true" => NativeToken::Bool(true),
         "where" => NativeToken::Where,
         _ => NativeToken::Identifier(identifier),
@@ -1563,6 +1661,7 @@ fn native_token_name(token: &NativeToken) -> &'static str {
     match token {
         NativeToken::And => "AND",
         NativeToken::Bool(_) => "boolean",
+        NativeToken::Comma => "','",
         NativeToken::Dot => "'.'",
         NativeToken::Equal => "'='",
         NativeToken::Eof => "end of query",
@@ -1574,6 +1673,7 @@ fn native_token_name(token: &NativeToken) -> &'static str {
         NativeToken::Or => "OR",
         NativeToken::RParen => "')'",
         NativeToken::String(_) => "string",
+        NativeToken::Table => "TABLE",
         NativeToken::Where => "WHERE",
     }
 }
@@ -2357,7 +2457,7 @@ Source expressions return matching page paths. DQL queries support path, JSON, \
 and markdown output modes. The default Obsidian engine is the exact Dataview \
 runtime. The explicit dynomark engine is a partial headless fallback for DQL \
 paths and JSON output. The native engine is a headless local frontmatter \
-subset for LIST queries.",
+subset for LIST and limited TABLE queries.",
         )
         .after_help(
             "Examples:\n  bob dataview --source '#project and -\"archive\"'\n  bob dataview --query 'LIST FROM #waiting'\n  bob dataview --format json --query-file ~/queries/projects.dql",

@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 15:50:33
-status: wip
+status: done
 prompt: sdd/prompts/202606/dataview_table_query.md
 ---
 # Plan: Fix `bob dataview` TABLE Query Behavior

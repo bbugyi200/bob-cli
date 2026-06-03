@@ -79,8 +79,8 @@ vault-relative Markdown path per line, `json` output is stable for scripts, and
 `ob sync`; vault freshness is handled by the external background or cron sync
 path. An explicit `--engine dynomark` mode is available for
 partial-compatibility headless DQL paths and JSON output. Use
-`--engine native` for local headless `LIST` queries over frontmatter fields and
-parent wikilink chains.
+`--engine native` for local headless `LIST` and limited `TABLE` queries over
+frontmatter fields and parent wikilink chains.
 
 The full command contract and live smoke-test steps live in
 [`docs/dataview.md`](docs/dataview.md).
