@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-02 23:12:10
-status: wip
+status: done
 prompt: sdd/prompts/202606/pomodoro_jump_center_fix.md
 ---
 # Fix `\\` Pomodoro Jump `zz`-Style Centering
