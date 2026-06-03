@@ -2,6 +2,8 @@
 create_time: 2026-06-03 12:47:34
 status: wip
 prompt: sdd/prompts/202606/dataview_mvp.md
+bead_id: bob-cli-3
+tier: epic
 ---
 # Plan: Ambitious MVP for `bob dataview`
 
