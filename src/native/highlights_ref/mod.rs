@@ -187,10 +187,17 @@ struct SidecarInput {
 struct SidecarAnnotation {
     kind: SidecarAnnotationKind,
     page_label: Option<String>,
+    linked_page_style: bool,
     text: String,
     comment: Option<String>,
     order: usize,
     ordinal_on_page: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidecarPageHeading {
+    label: String,
+    linked_page_style: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,19 +1111,22 @@ fn parse_sidecar_markdown(contents: &str) -> Vec<SidecarAnnotation> {
     let mut annotations = Vec::new();
     let mut chunk = Vec::new();
     let mut page_label = None;
+    let mut linked_page_style = false;
     let mut order = 0usize;
     let mut page_ordinals: BTreeMap<String, usize> = BTreeMap::new();
 
     for line in contents.lines() {
-        if let Some(next_page_label) = sidecar_page_heading(line) {
+        if let Some(next_page_heading) = sidecar_page_heading_details(line) {
             flush_sidecar_chunk(
                 &mut annotations,
                 &mut chunk,
                 page_label.as_deref(),
+                linked_page_style,
                 &mut order,
                 &mut page_ordinals,
             );
-            page_label = Some(next_page_label);
+            page_label = Some(next_page_heading.label);
+            linked_page_style = next_page_heading.linked_page_style;
             continue;
         }
 
@@ -1125,6 +1135,7 @@ fn parse_sidecar_markdown(contents: &str) -> Vec<SidecarAnnotation> {
                 &mut annotations,
                 &mut chunk,
                 page_label.as_deref(),
+                linked_page_style,
                 &mut order,
                 &mut page_ordinals,
             );
@@ -1138,6 +1149,7 @@ fn parse_sidecar_markdown(contents: &str) -> Vec<SidecarAnnotation> {
         &mut annotations,
         &mut chunk,
         page_label.as_deref(),
+        linked_page_style,
         &mut order,
         &mut page_ordinals,
     );
@@ -1148,10 +1160,13 @@ fn flush_sidecar_chunk(
     annotations: &mut Vec<SidecarAnnotation>,
     chunk: &mut Vec<String>,
     page_label: Option<&str>,
+    linked_page_style: bool,
     order: &mut usize,
     page_ordinals: &mut BTreeMap<String, usize>,
 ) {
-    if let Some(mut annotation) = parse_sidecar_chunk(chunk, page_label) {
+    if let Some(mut annotation) =
+        parse_sidecar_chunk(chunk, page_label, linked_page_style)
+    {
         *order += 1;
         annotation.order = *order;
         let page_key = annotation.page_label.clone().unwrap_or_default();
@@ -1166,6 +1181,7 @@ fn flush_sidecar_chunk(
 fn parse_sidecar_chunk(
     chunk: &[String],
     page_label: Option<&str>,
+    linked_page_style: bool,
 ) -> Option<SidecarAnnotation> {
     let lines = trim_blank_lines(chunk);
     if lines.is_empty() || lines.iter().all(|line| is_markdown_heading(line)) {
@@ -1178,19 +1194,29 @@ fn parse_sidecar_chunk(
     {
         let mut quote_lines = Vec::new();
         let mut index = blockquote_index;
+        let mut last_quote_line_was_blank = false;
         while index < lines.len() {
             let trimmed = lines[index].trim_start();
             if trimmed.starts_with('>') {
-                quote_lines.push(strip_blockquote_marker(trimmed));
+                let quote_line = strip_blockquote_marker(trimmed);
+                last_quote_line_was_blank = quote_line.trim().is_empty();
+                quote_lines.push(quote_line);
                 index += 1;
                 continue;
             }
-            if trimmed.is_empty()
-                && lines[index + 1..]
-                    .iter()
-                    .any(|line| line.trim_start().starts_with('>'))
+            if trimmed.is_empty() && should_keep_blank_quote_line(&lines, index)
             {
                 quote_lines.push(String::new());
+                last_quote_line_was_blank = true;
+                index += 1;
+                continue;
+            }
+            if !last_quote_line_was_blank
+                && linked_page_style
+                && is_quote_continuation_line(&lines[index])
+            {
+                quote_lines.push(trimmed.to_string());
+                last_quote_line_was_blank = false;
                 index += 1;
                 continue;
             }
@@ -1211,6 +1237,7 @@ fn parse_sidecar_chunk(
         return Some(SidecarAnnotation {
             kind: SidecarAnnotationKind::Highlight,
             page_label: page_label.map(str::to_string),
+            linked_page_style,
             text,
             comment: (!comment.is_empty())
                 .then(|| strip_comment_label(&comment)),
@@ -1228,6 +1255,7 @@ fn parse_sidecar_chunk(
     (!text.is_empty()).then(|| SidecarAnnotation {
         kind: SidecarAnnotationKind::StandaloneNote,
         page_label: page_label.map(str::to_string),
+        linked_page_style,
         text,
         comment: None,
         order: 0,
@@ -1248,9 +1276,7 @@ fn render_sidecar_highlights(
     let mut skipped_marker_note = false;
 
     for annotation in &sidecar.annotations {
-        if annotation.kind == SidecarAnnotationKind::StandaloneNote
-            && !skipped_marker_note
-        {
+        if !skipped_marker_note && is_sidecar_marker_mirror(annotation) {
             skipped_marker_note = true;
             continue;
         }
@@ -1366,22 +1392,95 @@ impl SidecarAnnotationKind {
     }
 }
 
+#[cfg(test)]
 fn sidecar_page_heading(line: &str) -> Option<String> {
+    sidecar_page_heading_details(line).map(|heading| heading.label)
+}
+
+fn sidecar_page_heading_details(line: &str) -> Option<SidecarPageHeading> {
     let trimmed = line.trim();
     if !trimmed.starts_with('#') {
         return None;
     }
     let heading = trimmed.trim_start_matches('#').trim();
-    let lower = heading.to_ascii_lowercase();
-    if lower.starts_with("page ")
-        || lower.starts_with("page:")
-        || lower.starts_with("p. ")
-        || lower.starts_with("p ")
-    {
-        Some(heading.to_string())
+    let (label, linked_page_style) = match markdown_link_label(heading) {
+        Some(label) => (label, true),
+        None => (heading, false),
+    };
+    if is_sidecar_page_label(label) {
+        Some(SidecarPageHeading {
+            label: label.to_string(),
+            linked_page_style,
+        })
     } else {
         None
     }
+}
+
+fn markdown_link_label(text: &str) -> Option<&str> {
+    if !text.starts_with('[') {
+        return None;
+    }
+    let (label, destination) = text[1..].split_once("](")?;
+    destination.ends_with(')').then_some(label)
+}
+
+fn is_sidecar_page_label(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.starts_with("page ")
+        || lower.starts_with("page:")
+        || lower.starts_with("p. ")
+        || lower.starts_with("p ")
+}
+
+fn is_sidecar_marker_mirror(annotation: &SidecarAnnotation) -> bool {
+    if annotation.kind == SidecarAnnotationKind::StandaloneNote {
+        return true;
+    }
+
+    if annotation.kind != SidecarAnnotationKind::Highlight {
+        return false;
+    }
+    if !annotation.linked_page_style {
+        return false;
+    }
+
+    let Some(comment) = &annotation.comment else {
+        return false;
+    };
+    parse_marker(comment).is_ok()
+}
+
+fn is_quote_continuation_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.is_empty()
+        && !is_markdown_heading(line)
+        && !is_comment_label_line(trimmed)
+        && !is_marker_list_line(trimmed)
+}
+
+fn is_comment_label_line(line: &str) -> bool {
+    ["Comment:", "comment:", "Note:", "note:"]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+fn is_marker_list_line(line: &str) -> bool {
+    let Some(item) =
+        line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+    else {
+        return false;
+    };
+    let Some((key, _)) = item.split_once(':') else {
+        return false;
+    };
+    !normalize_key(key).is_empty()
+}
+
+fn should_keep_blank_quote_line(lines: &[String], index: usize) -> bool {
+    lines[index + 1..]
+        .iter()
+        .any(|line| line.trim_start().starts_with('>'))
 }
 
 fn is_horizontal_rule(line: &str) -> bool {
@@ -2884,9 +2983,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        parse_marker, parse_note, pdf_path_metadata, projection_hash,
-        ref_note_path, render_marker, resolve_under_bob, Config, MarkerValue,
-        PipelineMetadata, Projection,
+        is_sidecar_marker_mirror, parse_marker, parse_note,
+        parse_sidecar_markdown, pdf_path_metadata, projection_hash,
+        ref_note_path, render_marker, resolve_under_bob, sidecar_page_heading,
+        Config, MarkerValue, PipelineMetadata, Projection,
+        SidecarAnnotationKind,
     };
 
     #[test]
@@ -2978,6 +3079,116 @@ mod tests {
             ref_note_path(&config, Path::new("/tmp/elsewhere/example.pdf"))
                 .expect("outside note path"),
             PathBuf::from("/tmp/bob/ref/example.md")
+        );
+    }
+
+    #[test]
+    fn sidecar_page_heading_extracts_linked_page_label() {
+        assert_eq!(
+            sidecar_page_heading(
+                "#### [Page 1](highlights://highlights-ref-sync#page=1)"
+            )
+            .as_deref(),
+            Some("Page 1")
+        );
+        assert_eq!(sidecar_page_heading("## p. 12").as_deref(), Some("p. 12"));
+        assert_eq!(sidecar_page_heading("# Systems Performance"), None);
+        assert_eq!(sidecar_page_heading("##### 2026-06-03:"), None);
+    }
+
+    #[test]
+    fn linked_sidecar_parser_keeps_wrapped_quotes_and_marker_mirror() {
+        let annotations = parse_sidecar_markdown(
+            "\
+# Highlights Reference Note Sync
+
+#### [Page 1](highlights://highlights-ref-sync#page=1)
+
+##### 2026-06-03:
+
+> Highlights Reference Note Sync
+
+- status: wip
+- parent: obsidian
+
+***
+
+#### [Page 2](highlights://highlights-ref-sync#page=2)
+
+##### 2026-06-03:
+
+> It only writes the PDF marker when frontmatter is the selected
+source and --write-pdf is supplied.
+
+***
+
+#### [Page 6](highlights://highlights-ref-sync#page=6)
+
+##### 2026-06-03:
+
+> Comment: Compare this with SLO notes.
+
+Some note...
+
+***
+",
+        );
+
+        assert_eq!(annotations.len(), 3);
+        assert!(is_sidecar_marker_mirror(&annotations[0]));
+        assert_eq!(annotations[0].page_label.as_deref(), Some("Page 1"));
+        assert!(annotations[0].linked_page_style);
+
+        assert_eq!(annotations[1].kind, SidecarAnnotationKind::Highlight);
+        assert_eq!(annotations[1].page_label.as_deref(), Some("Page 2"));
+        assert!(annotations[1].linked_page_style);
+        assert_eq!(
+            annotations[1].text,
+            "It only writes the PDF marker when frontmatter is the selected\nsource and --write-pdf is supplied."
+        );
+        assert_eq!(annotations[1].comment, None);
+
+        assert_eq!(annotations[2].page_label.as_deref(), Some("Page 6"));
+        assert_eq!(
+            annotations[2].text,
+            "Comment: Compare this with SLO notes."
+        );
+        assert_eq!(annotations[2].comment.as_deref(), Some("Some note..."));
+    }
+
+    #[test]
+    fn sidecar_quote_continuation_does_not_capture_labeled_comment() {
+        let annotations = parse_sidecar_markdown(
+            "\
+## Page 3
+
+> Stable quoted text.
+Comment: revised comment
+",
+        );
+
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].text, "Stable quoted text.");
+        assert_eq!(annotations[0].comment.as_deref(), Some("revised comment"));
+    }
+
+    #[test]
+    fn simple_sidecar_unlabeled_text_after_quote_remains_comment() {
+        let annotations = parse_sidecar_markdown(
+            "\
+## Page 3
+
+> Stable quoted text.
+Unlabeled comment
+",
+        );
+
+        assert_eq!(annotations.len(), 1);
+        assert!(!annotations[0].linked_page_style);
+        assert_eq!(annotations[0].text, "Stable quoted text.");
+        assert_eq!(
+            annotations[0].comment.as_deref(),
+            Some("Unlabeled comment")
         );
     }
 

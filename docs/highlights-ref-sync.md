@@ -250,7 +250,7 @@ unsupported-sidecar error. If no sidecar exists, `sync` still performs
 marker/frontmatter sync. For a new note it creates an empty managed region; for
 an existing note it preserves the existing managed region.
 
-The configured Markdown sidecar format is intentionally simple:
+Two Markdown sidecar shapes are supported. The simple shape is:
 
 - Page labels are Markdown headings such as `## Page 12` or `## p. 12`.
 - Annotation spacers are horizontal rules such as `---`.
@@ -262,7 +262,7 @@ The configured Markdown sidecar format is intentionally simple:
 - The first standalone note in sidecar order is treated as the PDF marker mirror
   and is excluded from generated content.
 
-Example sidecar fragment:
+Simple sidecar fragment:
 
 ```md
 ## Page 12
@@ -278,6 +278,46 @@ Comment: Compare this with SLO notes.
 ---
 
 Note: Keep this standalone observation.
+```
+
+The linked-page Highlights export shape is also supported:
+
+- Page labels may be Markdown-link headings such as
+  `#### [Page 1](highlights://book#page=1)`. The link label, `Page 1`, is used
+  as the rendered page heading.
+- Non-page headings such as the document title and dated metadata headings are
+  ignored by the annotation parser.
+- Annotation spacers may use any Markdown horizontal rule style, including
+  `***`.
+- Highlights may be hard-wrapped so that only the first physical line starts
+  with `>`. Immediate nonblank continuation lines are kept as highlight text,
+  but marker-list fields and explicit `Comment:`/`Note:` labels start the
+  comment side instead.
+- A blockquoted marker mirror title followed by marker-list fields such as
+  `status` and `parent` is excluded from generated content.
+
+Linked sidecar fragment:
+
+```md
+# Highlights Reference Note Sync
+
+#### [Page 1](highlights://highlights-ref-sync#page=1)
+
+##### 2026-06-03:
+
+> Highlights Reference Note Sync
+
+- status: wip
+- parent: obsidian
+
+***
+
+#### [Page 2](highlights://highlights-ref-sync#page=2)
+
+##### 2026-06-03:
+
+> It only writes the PDF marker when frontmatter is the selected
+source and --write-pdf is supplied.
 ```
 
 The generated region is the only body region the tool owns:

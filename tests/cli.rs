@@ -1316,6 +1316,97 @@ Note: Keep a standalone observation after the marker.
 }
 
 #[test]
+fn highlights_ref_sync_supports_linked_sidecar_style() {
+    let temp = TempDir::new("bob-cli-highlights-ref-linked-sidecar");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/highlights-ref-sync.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/highlights-ref-sync.md");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Highlights Reference Note Sync\n",
+    );
+    write_file(
+        &sidecar,
+        "\
+# Highlights Reference Note Sync
+
+#### [Page 1](highlights://highlights-ref-sync#page=1)
+
+##### 2026-06-03:
+
+> Highlights Reference Note Sync
+
+- status: wip
+- parent: obsidian
+
+***
+
+#### [Page 2](highlights://highlights-ref-sync#page=2)
+
+##### 2026-06-03:
+
+> It only writes the PDF marker when frontmatter is the selected
+source and --write-pdf is supplied.
+
+***
+
+#### [Page 6](highlights://highlights-ref-sync#page=6)
+
+##### 2026-06-03:
+
+> Comment: Compare this with SLO notes.
+
+Some note...
+
+***
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync linked sidecar highlights");
+
+    assert_success(&output);
+    let contents = fs::read_to_string(&note).expect("read generated note");
+    assert!(
+        contents
+            .contains("highlights_sidecar: lib/books/highlights-ref-sync.md\n"),
+        "{contents}"
+    );
+    assert!(contents.contains("highlights_count: 2\n"), "{contents}");
+    assert!(contents.contains("### Page 2\n"), "{contents}");
+    assert!(contents.contains("### Page 6\n"), "{contents}");
+    assert!(
+        contents.contains(
+            "> It only writes the PDF marker when frontmatter is the selected\n> source and --write-pdf is supplied.\n"
+        ),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("> Comment: Compare this with SLO notes.\n"),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("> [comment] Some note...\n"),
+        "{contents}"
+    );
+    assert!(
+        !contents.contains("> Highlights Reference Note Sync\n"),
+        "linked marker mirror title should not render as a highlight:\n{contents}"
+    );
+    assert!(
+        !contents.contains("> [comment] - status: wip"),
+        "linked marker mirror fields should not render as a comment:\n{contents}"
+    );
+    assert_eq!(highlight_block_ids(&contents).len(), 2, "{contents}");
+}
+
+#[test]
 fn highlights_ref_comment_edit_keeps_stable_block_id() {
     let temp = TempDir::new("bob-cli-highlights-ref-comment-edit");
     let vault = temp.path().join("vault");

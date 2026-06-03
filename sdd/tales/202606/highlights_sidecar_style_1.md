@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 07:29:36
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_sidecar_style_1.md
 ---
 # Highlights Linked Sidecar Support Plan
