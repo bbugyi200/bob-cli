@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 08:31:25
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_first_page_marker.md
 ---
 # First-Page-Only Highlights Marker Scan

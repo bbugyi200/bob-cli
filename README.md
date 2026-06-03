@@ -115,8 +115,8 @@ bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontma
 ```
 
 Prepares the Highlights app PDF annotation to Bob reference note sync workflow.
-`sync <pdf>` reads the first standalone PDF note annotation as the marker note,
-parses its `key: value` list, and creates or updates
+`sync <pdf>` reads the first standalone `/Text` PDF note annotation on page 1
+as the marker note, parses its `key: value` list, and creates or updates
 `ref/<ref_type>/<pdf-basename>.md` frontmatter and the managed Highlights body
 region for PDFs under `lib/<ref_type>/`. Top-level library PDFs and explicit
 out-of-library syncs keep the legacy `ref/<pdf-basename>.md` target. It stores a

@@ -13,8 +13,8 @@ generated note rendering, recursive library scan, prerequisite checks, output
 collision detection, dirty-target refusal, and atomic note writes.
 
 `sync <pdf>` loads one PDF with native Rust code, treats the first standalone
-`/Text` annotation as the marker note, parses the marker list, creates or
-updates `ref/<ref_type>/<pdf-basename>.md` for PDFs under
+`/Text` annotation on page 1 as the marker note, parses the marker list,
+creates or updates `ref/<ref_type>/<pdf-basename>.md` for PDFs under
 `lib/<ref_type>/`, and rewrites only the managed Highlights body region from the
 sidecar when one is present. Top-level library PDFs and explicit out-of-library
 syncs keep the legacy `ref/<pdf-basename>.md` target. `marker <pdf>` inspects
@@ -115,8 +115,9 @@ Top-level library PDFs remain supported for existing files and do not derive a
 
 ## Marker Note Grammar
 
-The marker note is the first standalone PDF note annotation in PDF order. It is
-not identified by a sentinel token.
+The marker note is the first standalone `/Text` PDF note annotation on page 1.
+It is not identified by a sentinel token, and standalone notes on later pages
+are not marker candidates.
 
 The marker note is an unordered list of `key: value` pairs:
 
@@ -391,8 +392,9 @@ In Highlights Pro on the MacBook:
 - Lock the Highlights Note Format to the sidecar contract above: page headings,
   `---` annotation separators, highlights as blockquote lines, highlight
   comments as plain paragraphs, and standalone notes as plain paragraphs.
-- Add exactly one marker note as the first standalone PDF note annotation.
-- Put at least `status` and `parent` in that first standalone note.
+- Add exactly one marker note as the first standalone `/Text` PDF note
+  annotation on page 1.
+- Put at least `status` and `parent` in that page-1 standalone note.
 
 Use this marker as a starting point:
 
@@ -649,7 +651,7 @@ Common failure snippets and fixes:
 | Message snippet | Meaning | Fix |
 | --- | --- | --- |
 | `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
-| `no standalone /Text note annotations found` | The PDF has no standalone marker note. | Add the first standalone PDF note in Highlights. |
+| `no standalone /Text note annotations found on page 1` | The PDF has no page-1 standalone marker note. | Add the first standalone PDF note on page 1 in Highlights. |
 | `missing required marker key: status` | The marker list lacks `status`. | Add `- status: wip` to the marker. |
 | `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add `- parent: obsidian` to the marker or frontmatter source; `[[obsidian]]` is also accepted. |
 | `'type' is command-managed` | The marker tries to set the generated note `type`. | Remove `type` from the marker; generated notes get `type: "[[ref]]"` automatically. |

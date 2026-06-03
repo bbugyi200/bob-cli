@@ -1756,7 +1756,7 @@ fn build_cli() -> ClapCommand {
                     .about("Inspect the marker note for one PDF")
                     .arg(pdf_arg("PDF whose marker note should be inspected")),
             )
-            .after_help("The marker note is the first standalone PDF note annotation."),
+            .after_help("The marker note is the first standalone /Text annotation on page 1."),
         )
         .subcommand(
             with_scan_args(
@@ -1794,7 +1794,7 @@ fn with_sync_args(command: ClapCommand) -> ClapCommand {
         .arg(prefer_arg())
         .arg(ref_dir_arg())
         .arg(write_pdf_arg())
-        .after_help("The first standalone /Text annotation in the PDF is treated as the marker note.")
+        .after_help("The first standalone /Text annotation on page 1 is treated as the marker note.")
 }
 
 fn bob_dir_arg() -> Arg {
@@ -2433,45 +2433,49 @@ fn read_pdf_marker(path: &Path) -> Result<PdfMarker> {
     let document = Document::load_mem(&bytes).map_err(|error| {
         CommandError::new(format!("read PDF {}: {error}", path.display()))
     })?;
+    let Some(first_page_id) = document.page_iter().next() else {
+        return Err(CommandError::new(format!(
+            "no first page found in {}; marker note must be on page 1",
+            path.display()
+        )));
+    };
     let mut note_number = 0;
 
-    for (page_number, page_id) in document.get_pages() {
-        for annotation_id in annotation_ids_for_page(&document, page_id)? {
-            let annotation =
-                document.get_dictionary(annotation_id).map_err(|error| {
-                    CommandError::new(format!(
-                        "read annotation {annotation_id:?} in {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            if !is_standalone_note(annotation) {
-                continue;
-            }
-            note_number += 1;
-            let contents = annotation
-                .get(b"Contents")
-                .ok()
-                .map(decode_text_string)
-                .transpose()
-                .map_err(|error| {
-                    CommandError::new(format!(
-                        "decode marker contents in {}: {error}",
-                        path.display()
-                    ))
-                })?
-                .unwrap_or_default();
-            return Ok(PdfMarker {
-                annotation_id,
-                contents,
-                page_number,
-                note_number,
-                source_pdf_sha256,
-            });
+    for annotation_id in annotation_ids_for_page(&document, first_page_id)? {
+        let annotation =
+            document.get_dictionary(annotation_id).map_err(|error| {
+                CommandError::new(format!(
+                    "read annotation {annotation_id:?} in {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if !is_standalone_note(annotation) {
+            continue;
         }
+        note_number += 1;
+        let contents = annotation
+            .get(b"Contents")
+            .ok()
+            .map(decode_text_string)
+            .transpose()
+            .map_err(|error| {
+                CommandError::new(format!(
+                    "decode marker contents in {}: {error}",
+                    path.display()
+                ))
+            })?
+            .unwrap_or_default();
+        return Ok(PdfMarker {
+            annotation_id,
+            contents,
+            page_number: 1,
+            note_number,
+            source_pdf_sha256,
+        });
     }
 
     Err(CommandError::new(format!(
-        "no standalone /Text note annotations found in {}",
+        "no standalone /Text note annotations found on page 1 in {}",
         path.display()
     )))
 }

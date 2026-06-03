@@ -485,6 +485,78 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
 }
 
 #[test]
+fn highlights_ref_marker_uses_first_page_text_annotation() {
+    let temp = TempDir::new("bob-cli-highlights-ref-first-page-marker");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/two-page.pdf");
+    write_highlights_pdf_pages(
+        &pdf,
+        &[
+            &["- status: wip\n- parent: [[obsidian]]\n- title: Page One\n"],
+            &["- status: done\n- parent: [[ignored]]\n- title: Page Two\n"],
+        ],
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("marker")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("inspect first-page marker");
+
+    assert_success(&output);
+    let marker = stdout(&output);
+    assert!(marker.contains("marker_page: 1"), "{marker}");
+    assert!(marker.contains("marker_note: 1"), "{marker}");
+    assert!(marker.contains("title: Page One"), "{marker}");
+    assert!(
+        !marker.contains("Page Two"),
+        "later page note must not be selected:\n{marker}"
+    );
+}
+
+#[test]
+fn highlights_ref_scan_treats_later_page_note_as_missing_marker() {
+    let temp = TempDir::new("bob-cli-highlights-ref-page-two-marker");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/page-two-marker.pdf");
+    let note = vault.join("ref/books/page-two-marker.md");
+    write_highlights_pdf_pages(
+        &pdf,
+        &[
+            &[],
+            &["- status: wip\n- parent: [[obsidian]]\n- title: Page Two\n"],
+        ],
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run highlights-ref scan");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "later page marker-like note should fail:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("scan failed before writes")
+            && stderr(&output).contains(path_str(&pdf))
+            && stderr(&output).contains(
+                "no standalone /Text note annotations found on page 1"
+            ),
+        "expected page-1 missing marker error:\n{}",
+        format_output(&output)
+    );
+    assert!(!note.exists(), "scan must not write a note on marker error");
+}
+
+#[test]
 fn highlights_ref_sync_rejects_missing_marker_status_without_note_write() {
     let temp = TempDir::new("bob-cli-highlights-ref-missing-status");
     let vault = temp.path().join("vault");
@@ -3211,6 +3283,10 @@ fn highlight_block_ids(contents: &str) -> Vec<String> {
 }
 
 fn write_highlights_pdf(path: &Path, marker_contents: &str) {
+    write_highlights_pdf_pages(path, &[&[marker_contents]]);
+}
+
+fn write_highlights_pdf_pages(path: &Path, page_text_annotations: &[&[&str]]) {
     use lopdf::{dictionary, Document, Object, Stream};
 
     if let Some(parent) = path.parent() {
@@ -3221,36 +3297,50 @@ fn write_highlights_pdf(path: &Path, marker_contents: &str) {
 
     let mut doc = Document::with_version("1.4");
     let pages_id = doc.new_object_id();
-    let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
-    let marker_id = doc.add_object(dictionary! {
-        "Type" => "Annot",
-        "Subtype" => "Text",
-        "Rect" => vec![
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(24),
-            Object::Integer(24),
-        ],
-        "Contents" => pdf_text_string(marker_contents),
-    });
-    let page_id = doc.add_object(dictionary! {
-        "Type" => "Page",
-        "Parent" => pages_id,
-        "MediaBox" => vec![
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(612),
-            Object::Integer(792),
-        ],
-        "Contents" => content_id,
-        "Annots" => vec![Object::Reference(marker_id)],
-    });
+    let mut page_ids = Vec::new();
+    for annotations in page_text_annotations {
+        let content_id =
+            doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let annot_refs = annotations
+            .iter()
+            .map(|contents| {
+                let annot_id = doc.add_object(dictionary! {
+                    "Type" => "Annot",
+                    "Subtype" => "Text",
+                    "Rect" => vec![
+                        Object::Integer(0),
+                        Object::Integer(0),
+                        Object::Integer(24),
+                        Object::Integer(24),
+                    ],
+                    "Contents" => pdf_text_string(contents),
+                });
+                Object::Reference(annot_id)
+            })
+            .collect::<Vec<_>>();
+        let mut page = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ],
+            "Contents" => content_id,
+        };
+        if !annot_refs.is_empty() {
+            page.set("Annots", Object::Array(annot_refs));
+        }
+        let page_id = doc.add_object(page);
+        page_ids.push(Object::Reference(page_id));
+    }
     doc.set_object(
         pages_id,
         dictionary! {
             "Type" => "Pages",
-            "Kids" => vec![Object::Reference(page_id)],
-            "Count" => 1,
+            "Kids" => page_ids,
+            "Count" => page_text_annotations.len() as i64,
         },
     );
     let catalog_id = doc.add_object(dictionary! {
