@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 09:22:29
-status: wip
+status: done
 prompt: sdd/prompts/202606/remove_highlights_ref_scaffold.md
 ---
 # Remove Highlights Ref Summary/My Notes Scaffold

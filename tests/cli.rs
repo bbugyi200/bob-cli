@@ -862,8 +862,29 @@ Note: marker note
         "{first_contents}"
     );
     assert!(
+        first_contents.contains("## Highlights\n"),
+        "{first_contents}"
+    );
+    assert!(!first_contents.contains("## Summary\n"), "{first_contents}");
+    assert!(
+        !first_contents.contains("## My Notes\n"),
+        "{first_contents}"
+    );
+    assert!(
         second_contents.contains("ref_type: papers\n")
             && second_contents.contains("> Second quote.\n"),
+        "{second_contents}"
+    );
+    assert!(
+        second_contents.contains("## Highlights\n"),
+        "{second_contents}"
+    );
+    assert!(
+        !second_contents.contains("## Summary\n"),
+        "{second_contents}"
+    );
+    assert!(
+        !second_contents.contains("## My Notes\n"),
         "{second_contents}"
     );
 
@@ -1043,7 +1064,7 @@ fn highlights_ref_sync_refuses_dirty_target_note_before_writing() {
     git_in(&vault, ["commit", "-q", "-m", "initial sync"]);
     let dirty_note = fs::read_to_string(&note)
         .expect("read note")
-        .replace("## My Notes\n\n", "## My Notes\n\nLocal edit.\n\n");
+        .replace("## Highlights\n\n", "Local edit.\n\n## Highlights\n\n");
     write_file(&note, &dirty_note);
     set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
 
@@ -1437,9 +1458,11 @@ Note: Keep a standalone observation after the marker.
         "{contents}"
     );
     assert!(
-        contents.contains("## Summary\n\n## My Notes\n\n## Highlights\n"),
+        contents.contains("## Highlights\n\n<!-- highlights:begin -->\n"),
         "{contents}"
     );
+    assert!(!contents.contains("## Summary\n"), "{contents}");
+    assert!(!contents.contains("## My Notes\n"), "{contents}");
     assert!(contents.contains("### Page 12\n"), "{contents}");
     assert!(
         contents.contains("> Latency is not throughput.\n"),
@@ -1748,7 +1771,10 @@ Note: marker note
     let edited = fs::read_to_string(&note)
         .expect("read note")
         .replacen("---\n", "---\nowner: Bryan\n", 1)
-        .replace("## My Notes\n\n", "## My Notes\n\nManual synthesis.\n\n");
+        .replace(
+            "## Highlights\n\n",
+            "## Manual Notes\n\nManual synthesis.\n\n## Highlights\n\n",
+        );
     write_file(&note, &edited);
     write_file(
         &sidecar,

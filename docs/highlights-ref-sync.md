@@ -336,10 +336,9 @@ The generated region is the only body region the tool owns:
 Manual content outside those markers must be preserved. User edits inside the
 generated region may be overwritten.
 
-New generated notes include a title, a PDF wikilink, `## Summary`, `## My
-Notes`, and `## Highlights`. Existing notes must already contain the managed
-begin/end markers; otherwise `sync` fails instead of guessing where generated
-content belongs.
+New generated notes include a title, a PDF wikilink, and `## Highlights`.
+Existing notes must already contain the managed begin/end markers; otherwise
+`sync` fails instead of guessing where generated content belongs.
 
 Generated blocks use Obsidian block IDs beginning with `^h-`. The MVP ID is a
 deterministic content hash over source PDF path, page label, annotation kind,
