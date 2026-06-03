@@ -6,6 +6,8 @@ use std::{
     fmt, fs, io, iter,
     path::{Component, Path, PathBuf},
     process::{self, Output, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -133,6 +135,7 @@ struct PdfMarker {
     contents: String,
     page_number: u32,
     note_number: usize,
+    source_pdf_sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -277,7 +280,24 @@ fn run_scan(matches: &ArgMatches) -> i32 {
         write_pdf: false,
         prefer: None,
     };
-    report_result(scan_library(&config, options))
+    report_result(scan_library(&config, options, jobs_from_matches(matches)))
+}
+
+/// Resolve the requested degree of cross-PDF parallelism for `scan`.
+///
+/// Defaults to the number of available CPU cores; `--jobs 1` forces the
+/// original sequential behavior.
+fn jobs_from_matches(matches: &ArgMatches) -> usize {
+    matches
+        .get_one::<u64>("jobs")
+        .map(|jobs| *jobs as usize)
+        .unwrap_or_else(default_jobs)
+}
+
+fn default_jobs() -> usize {
+    thread::available_parallelism()
+        .map(|cores| cores.get())
+        .unwrap_or(1)
 }
 
 fn run_sync(matches: &ArgMatches) -> i32 {
@@ -337,14 +357,25 @@ fn sync_pdf(config: &Config, pdf: &Path, options: SyncOptions) -> Result<()> {
     Ok(())
 }
 
-fn scan_library(config: &Config, options: SyncOptions) -> Result<()> {
+fn scan_library(
+    config: &Config,
+    options: SyncOptions,
+    jobs: usize,
+) -> Result<()> {
     let pdfs = collect_pdf_paths(config)?;
     validate_output_collisions(config, &pdfs)?;
 
+    // `plan_pdf_sync` is a pure, read-only computation over an independent
+    // `&Config` and one PDF path, so planning is embarrassingly parallel. We
+    // collect into a position-keyed vector and reassemble in `pdfs` order so
+    // reporting output (and the aggregated error message) stays deterministic
+    // regardless of completion order.
     let mut plans = Vec::new();
     let mut errors = Vec::new();
-    for pdf in &pdfs {
-        match plan_pdf_sync(config, pdf, options) {
+    for (pdf, result) in
+        pdfs.iter().zip(plan_pdfs(config, &pdfs, options, jobs))
+    {
+        match result {
             Ok(plan) => plans.push(plan),
             Err(error) => {
                 errors.push(format!("{}: {error}", pdf.display()));
@@ -380,6 +411,60 @@ fn scan_library(config: &Config, options: SyncOptions) -> Result<()> {
     }
     print_scan_write_summary(&reports);
     Ok(())
+}
+
+/// Plan every PDF, returning results in the same order as `pdfs`.
+///
+/// With `jobs <= 1` (or a trivial workload) this is the original sequential
+/// loop. Otherwise a small fixed pool of scoped threads pulls PDFs off a shared
+/// counter; each worker keeps its results paired with their original index so
+/// we can restore `pdfs` order before returning.
+fn plan_pdfs(
+    config: &Config,
+    pdfs: &[PathBuf],
+    options: SyncOptions,
+    jobs: usize,
+) -> Vec<Result<PdfSyncPlan>> {
+    if jobs <= 1 || pdfs.len() <= 1 {
+        return pdfs
+            .iter()
+            .map(|pdf| plan_pdf_sync(config, pdf, options))
+            .collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let worker_count = jobs.min(pdfs.len());
+    let mut indexed: Vec<(usize, Result<PdfSyncPlan>)> =
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..worker_count)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        let mut local = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(pdf) = pdfs.get(index) else {
+                                break;
+                            };
+                            local.push((
+                                index,
+                                plan_pdf_sync(config, pdf, options),
+                            ));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle.join().expect("planning worker thread panicked")
+                })
+                .collect()
+        });
+
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, result)| result).collect()
 }
 
 fn plan_pdf_sync(
@@ -437,6 +522,7 @@ fn plan_pdf_sync(
     let stable_metadata = pipeline_metadata(
         config,
         pdf,
+        &marker.source_pdf_sha256,
         &note,
         sidecar.as_ref(),
         rendered_highlights.as_ref(),
@@ -496,9 +582,19 @@ fn execute_pdf_sync(
         plan.stable_note_action != "none" && plan.rendered_highlights.is_some();
     let refresh_metadata = plan.marker_write_needed || refresh_synced_at;
     let rendered_note = if refresh_metadata {
+        // `write_pdf_marker` rewrites the PDF in place, so the planning-time
+        // hash is stale; rehash the file to record the post-write digest.
+        // When no marker write happened the PDF is untouched, so the hash the
+        // planner already computed from the same bytes is reused for free.
+        let source_pdf_sha256 = if plan.marker_write_needed {
+            sha256_file(&plan.pdf)?
+        } else {
+            plan.marker.source_pdf_sha256.clone()
+        };
         let metadata = pipeline_metadata(
             config,
             &plan.pdf,
+            &source_pdf_sha256,
             &plan.note,
             plan.sidecar.as_ref(),
             plan.rendered_highlights.as_ref(),
@@ -1683,6 +1779,7 @@ fn with_scan_args(command: ClapCommand) -> ClapCommand {
     command
         .arg(bob_dir_arg())
         .arg(dry_run_arg())
+        .arg(jobs_arg())
         .arg(lib_dir_arg())
         .arg(ref_dir_arg())
 }
@@ -1739,6 +1836,17 @@ fn dry_run_arg() -> Arg {
         .long("dry-run")
         .action(ArgAction::SetTrue)
         .help("Preview work without modifying the vault or PDF")
+}
+
+fn jobs_arg() -> Arg {
+    Arg::new("jobs")
+        .long("jobs")
+        .short('j')
+        .value_name("N")
+        .value_parser(clap::value_parser!(u64).range(1..))
+        .help(
+            "Process this many PDFs in parallel; defaults to available CPU cores (use 1 to force sequential)",
+        )
 }
 
 fn prefer_arg() -> Arg {
@@ -2090,6 +2198,7 @@ impl ParsedNote {
 fn pipeline_metadata(
     config: &Config,
     pdf: &Path,
+    source_pdf_sha256: &str,
     note: &ParsedNote,
     sidecar: Option<&SidecarInput>,
     rendered_highlights: Option<&RenderedHighlights>,
@@ -2119,7 +2228,7 @@ fn pipeline_metadata(
 
     Ok(PipelineMetadata {
         source_pdf: source_pdf_value(config, pdf),
-        source_pdf_sha256: sha256_file(pdf)?,
+        source_pdf_sha256: source_pdf_sha256.to_string(),
         ref_type,
         highlights_sidecar,
         highlights_count,
@@ -2314,7 +2423,14 @@ fn prefer_from_matches(matches: &ArgMatches) -> Option<Prefer> {
 }
 
 fn read_pdf_marker(path: &Path) -> Result<PdfMarker> {
-    let document = Document::load(path).map_err(|error| {
+    // Read the PDF from disk exactly once and reuse the bytes for both the
+    // SHA-256 (pipeline metadata) and the lopdf parse, instead of reading the
+    // whole file twice (Document::load plus a separate hash pass).
+    let bytes = fs::read(path).map_err(|error| {
+        CommandError::new(format!("read PDF {}: {error}", path.display()))
+    })?;
+    let source_pdf_sha256 = hex::encode(Sha256::digest(&bytes));
+    let document = Document::load_mem(&bytes).map_err(|error| {
         CommandError::new(format!("read PDF {}: {error}", path.display()))
     })?;
     let mut note_number = 0;
@@ -2349,6 +2465,7 @@ fn read_pdf_marker(path: &Path) -> Result<PdfMarker> {
                 contents,
                 page_number,
                 note_number,
+                source_pdf_sha256,
             });
         }
     }

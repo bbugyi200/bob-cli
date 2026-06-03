@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 08:03:34
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_scan_speedup.md
 ---
 # Make `bob highlights-ref scan` WAY Faster

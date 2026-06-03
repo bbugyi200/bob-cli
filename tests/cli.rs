@@ -776,6 +776,68 @@ Note: marker note
 }
 
 #[test]
+fn highlights_ref_scan_jobs_flag_matches_sequential_output() {
+    let temp = TempDir::new("bob-cli-highlights-ref-scan-jobs");
+    let vault = temp.path().join("vault");
+
+    // Spread several PDFs across nested ref types so completion order under
+    // parallel planning is unlikely to match the sorted reporting order.
+    let specs = [
+        ("lib/books/alpha.pdf", "wip", "Alpha", "Alpha quote."),
+        ("lib/books/beta.pdf", "queued", "Beta", "Beta quote."),
+        ("lib/papers/gamma.pdf", "wip", "Gamma", "Gamma quote."),
+        ("lib/papers/delta.pdf", "queued", "Delta", "Delta quote."),
+        ("lib/notes/epsilon.pdf", "wip", "Epsilon", "Epsilon quote."),
+    ];
+    for (rel, status, title, quote) in specs {
+        let pdf = vault.join(rel);
+        write_highlights_pdf(
+            &pdf,
+            &format!(
+                "- status: {status}\n- parent: [[obsidian]]\n- title: {title}\n"
+            ),
+        );
+        write_file(
+            &pdf.with_extension("md"),
+            &format!("## Page 1\n\nNote: marker note\n\n---\n\n> {quote}\n"),
+        );
+    }
+
+    let run_scan = |jobs: &str| {
+        let output = bob_command()
+            .arg("highlights-ref")
+            .arg("scan")
+            .arg("--dry-run")
+            .arg("--jobs")
+            .arg(jobs)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("dry-run highlights-ref scan with --jobs");
+        assert_success(&output);
+        stdout(&output)
+    };
+
+    // Dry-run scan output carries no timestamps, so order-preserving parallel
+    // planning must produce byte-identical output regardless of job count.
+    let sequential = run_scan("1");
+    let parallel = run_scan("4");
+    assert_eq!(sequential, parallel, "--jobs must not change scan output");
+    assert!(sequential.contains("pdf_count: 5"), "{sequential}");
+    assert!(sequential.contains("notes_create: 5"), "{sequential}");
+
+    // Rejecting --jobs 0 keeps the flag meaningful (1 = sequential floor).
+    let zero = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--jobs")
+        .arg("0")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("reject --jobs 0");
+    assert!(!zero.status.success(), "--jobs 0 must be rejected");
+}
+
+#[test]
 fn highlights_ref_scan_allows_duplicate_basenames_in_different_ref_types() {
     let temp = TempDir::new("bob-cli-highlights-ref-scan-ref-types");
     let vault = temp.path().join("vault");
