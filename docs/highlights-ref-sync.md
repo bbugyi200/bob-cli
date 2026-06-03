@@ -190,6 +190,7 @@ source_pdf_sha256
 highlights_sidecar
 highlights_count
 highlights_synced_at
+highlights_marker_base
 highlights_marker_hash
 highlights_marker_fields
 pipeline_version
@@ -208,12 +209,16 @@ Implemented conflict policy:
 - If only the marker changed, update frontmatter.
 - If only frontmatter changed, update the PDF marker note when PDF writes are
   enabled.
-- If both changed differently, fail without modifying either side unless
+- If marker and frontmatter changed different fields from the stored base,
+  auto-merge them. PDF marker writes are still opt-in with `--write-pdf`.
+- If both changed the same field differently, fail without modifying either side unless
   `--prefer marker` or `--prefer frontmatter` is supplied.
 
-The last synced user-property projection is stored as `highlights_marker_hash`.
-`--prefer frontmatter` requires `--write-pdf` whenever the PDF marker must be
-updated.
+The last synced user-property projection is stored as `highlights_marker_hash`
+and as compact JSON in `highlights_marker_base`. The hash keeps old-note
+compatibility; the base snapshot lets the command prove safe field-level
+merges. `--prefer frontmatter` and any auto-merge that includes frontmatter
+changes require `--write-pdf` whenever the PDF marker must be updated.
 
 PDF marker writes are performed by saving a temporary PDF next to the original
 and renaming it over the target. Before first PDF writes, commit or otherwise
@@ -462,6 +467,19 @@ bob highlights-ref sync ~/bob/lib/books/example.pdf --dry-run
 bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
 ```
 
+The intended frontmatter edit workflow is:
+
+```bash
+$EDITOR ~/bob/ref/books/example.md
+bob highlights-ref sync ~/bob/lib/books/example.pdf --dry-run
+bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
+```
+
+If the ref note is tracked in Git, the write-back command may update that dirty
+note only when the dirty changes are unstaged frontmatter-only edits and the
+file still matches what the command planned from. Body edits, managed-region
+edits, staged changes, untracked notes, and dirty PDFs are still refused.
+
 Keep Highlights and Obsidian idle while testing PDF marker writes so the apps do
 not race the CLI.
 
@@ -619,7 +637,9 @@ cp -p "$backup_dir/lib/books/example.pdf" ~/bob/lib/books/example.pdf
 ## Conflict Resolution
 
 When the marker and frontmatter both changed since the last synced projection,
-the command fails with a conflict and writes nothing. Inspect both sides:
+the command compares both sides to `highlights_marker_base`. Non-overlapping
+field edits auto-merge and dry runs report `sync_source: auto-merge`. Same-field
+conflicts still fail and write nothing. Inspect both sides:
 
 ```bash
 bob highlights-ref marker ~/bob/lib/books/example.pdf
@@ -641,7 +661,8 @@ bob highlights-ref sync ~/bob/lib/books/example.pdf --prefer frontmatter --write
 ```
 
 If the only change is frontmatter and the command says `--write-pdf` is missing,
-review the marker first, back up the PDF, then run:
+or a dry-run auto-merge reports `pdf_marker_action: would-update`, review the
+marker first, back up the PDF, then run:
 
 ```bash
 bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
@@ -662,8 +683,9 @@ Common failure snippets and fixes:
 | `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |
 | `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |
 | `output path collision(s) detected before writes` | Multiple PDFs would write the same reference note path, such as `ref/books/example.md`. | Rename or move one PDF before scanning. |
-| `refusing to modify dirty vault files` | Git reports dirty files the command would touch. | Commit, stash, or clean those paths. |
-| `frontmatter changed but --write-pdf was not supplied` | Frontmatter is the selected source, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
-| `marker/frontmatter conflict` | Marker and frontmatter changed differently. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
+| `refusing to modify dirty vault files` | Git reports dirty touched paths outside the allowed frontmatter-only note write-back case. | Commit, stash, or clean those paths. |
+| `frontmatter changed but --write-pdf was not supplied` | Frontmatter contributes to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
+| `marker/frontmatter conflict` | Marker and frontmatter changed the same field differently, or the note has no stored base snapshot for a safe merge. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
+| `changed during sync; rerun` | The note or PDF changed after planning and before writing. | Rerun after closing or pausing apps that may touch the file. |
 | `existing reference note is missing the managed Highlights region` | An existing ref note lacks `<!-- highlights:begin -->` and `<!-- highlights:end -->`. | Add both markers around the generated section or move the note aside and regenerate. |
 | `unsupported textbundle sidecar` | The `.textbundle` has no `text.md` or `text.markdown`. | Switch Highlights to Markdown sidecars or add one of those files. |

@@ -49,6 +49,7 @@ const FIELD_SOURCE_PDF_SHA256: &str = "source_pdf_sha256";
 const FIELD_HIGHLIGHTS_SIDECAR: &str = "highlights_sidecar";
 const FIELD_HIGHLIGHTS_COUNT: &str = "highlights_count";
 const FIELD_HIGHLIGHTS_SYNCED_AT: &str = "highlights_synced_at";
+const FIELD_MARKER_BASE: &str = "highlights_marker_base";
 const FIELD_MARKER_HASH: &str = "highlights_marker_hash";
 const FIELD_MARKER_FIELDS: &str = "highlights_marker_fields";
 const FIELD_PIPELINE_VERSION: &str = "pipeline_version";
@@ -59,6 +60,7 @@ const PIPELINE_FIELDS: &[&str] = &[
     FIELD_HIGHLIGHTS_SIDECAR,
     FIELD_HIGHLIGHTS_COUNT,
     FIELD_HIGHLIGHTS_SYNCED_AT,
+    FIELD_MARKER_BASE,
     FIELD_MARKER_HASH,
     FIELD_MARKER_FIELDS,
     FIELD_PIPELINE_VERSION,
@@ -94,7 +96,7 @@ struct SyncOptions {
     prefer: Option<Prefer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "value")]
 enum MarkerValue {
     Null,
@@ -149,6 +151,7 @@ struct FrontmatterEntry {
 struct ParsedNote {
     frontmatter: Vec<FrontmatterEntry>,
     body: String,
+    original: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,12 +175,41 @@ struct PdfPathMetadata {
 enum SyncSource {
     Marker,
     Frontmatter,
+    AutoMerge,
 }
 
 #[derive(Debug, Clone)]
 struct SyncDecision {
     source: SyncSource,
-    reason: &'static str,
+    reason: String,
+    marker_contributed: bool,
+    frontmatter_contributed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SyncResolution {
+    decision: SyncDecision,
+    projection: Projection,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyncInputs<'a> {
+    last_hash: Option<&'a str>,
+    base_projection: Option<&'a Projection>,
+    marker_projection: &'a Projection,
+    marker_hash: &'a str,
+    frontmatter_projection: &'a Projection,
+    frontmatter_hash: &'a str,
+    note_exists: bool,
+    prefer: Option<Prefer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionConflict {
+    key: String,
+    base: Option<MarkerValue>,
+    marker: Option<MarkerValue>,
+    frontmatter: Option<MarkerValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,7 +277,15 @@ struct SyncWriteReport {
 enum GitStatus {
     MissingCommand,
     NotWorktree,
-    Worktree { entries: Vec<String> },
+    Worktree { entries: Vec<GitStatusEntry> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitStatusEntry {
+    index_status: char,
+    worktree_status: char,
+    path: PathBuf,
+    raw: String,
 }
 
 pub(crate) fn run(args: Vec<OsString>) -> i32 {
@@ -481,27 +521,26 @@ fn plan_pdf_sync(
     let marker_hash = projection_hash(&marker_projection)?;
     let frontmatter_hash = projection_hash(&frontmatter_projection)?;
     let last_hash = note.marker_hash();
-    let decision = decide_sync_source(
-        last_hash.as_deref(),
-        &marker_hash,
-        &frontmatter_hash,
-        note.exists(),
-        options.prefer,
+    let base_projection = note.marker_base_projection()?;
+    let resolution = resolve_sync_projection(SyncInputs {
+        last_hash: last_hash.as_deref(),
+        base_projection: base_projection.as_ref(),
+        marker_projection: &marker_projection,
+        marker_hash: &marker_hash,
+        frontmatter_projection: &frontmatter_projection,
+        frontmatter_hash: &frontmatter_hash,
+        note_exists: note.exists(),
+        prefer: options.prefer,
+    })?;
+    let decision = resolution.decision;
+    let synced_projection = resolution.projection;
+    validate_required_marker_keys(
+        &synced_projection,
+        decision.source.as_str(),
     )?;
-
-    let synced_projection = match decision.source {
-        SyncSource::Marker => marker_projection.clone(),
-        SyncSource::Frontmatter => {
-            validate_required_marker_keys(
-                &frontmatter_projection,
-                "frontmatter",
-            )?;
-            frontmatter_projection.clone()
-        }
-    };
     let synced_hash = projection_hash(&synced_projection)?;
     let rendered_marker = render_marker(&synced_projection);
-    let marker_write_needed = decision.source == SyncSource::Frontmatter
+    let marker_write_needed = decision.frontmatter_contributed
         && normalize_line_endings(&rendered_marker)
             != normalize_line_endings(&marker.contents);
 
@@ -570,7 +609,11 @@ fn execute_pdf_sync(
     config: &Config,
     plan: &PdfSyncPlan,
 ) -> Result<SyncWriteReport> {
+    if note_write_planned(plan) {
+        ensure_note_unchanged_for_write(plan)?;
+    }
     if plan.marker_write_needed {
+        ensure_pdf_unchanged_for_write(plan)?;
         write_pdf_marker(
             &plan.pdf,
             plan.marker.annotation_id,
@@ -615,6 +658,7 @@ fn execute_pdf_sync(
         &rendered_note,
     );
     if plan.note.contents().as_deref() != Some(rendered_note.as_str()) {
+        ensure_note_unchanged_for_write(plan)?;
         atomic_write(&plan.note_path, &rendered_note)?;
     }
 
@@ -626,6 +670,52 @@ fn execute_pdf_sync(
             "none"
         },
     })
+}
+
+fn ensure_note_unchanged_for_write(plan: &PdfSyncPlan) -> Result<()> {
+    if note_contents_match_plan(
+        &plan.note_path,
+        plan.note.contents().as_deref(),
+    )? {
+        Ok(())
+    } else {
+        Err(CommandError::new(format!(
+            "reference note changed during sync; rerun: {}",
+            plan.note_path.display()
+        )))
+    }
+}
+
+fn note_contents_match_plan(
+    path: &Path,
+    expected: Option<&str>,
+) -> Result<bool> {
+    match (expected, fs::read_to_string(path)) {
+        (Some(expected), Ok(current)) => Ok(current == expected),
+        (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(true)
+        }
+        (None, Ok(_)) => Ok(false),
+        (Some(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(false)
+        }
+        (_, Err(error)) => Err(CommandError::new(format!(
+            "read note {} before write: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn ensure_pdf_unchanged_for_write(plan: &PdfSyncPlan) -> Result<()> {
+    let current_hash = sha256_file(&plan.pdf)?;
+    if current_hash == plan.marker.source_pdf_sha256 {
+        Ok(())
+    } else {
+        Err(CommandError::new(format!(
+            "PDF changed during sync; rerun: {}",
+            plan.pdf.display()
+        )))
+    }
 }
 
 fn print_pdf_sync_report(
@@ -653,6 +743,16 @@ fn print_pdf_sync_report(
     println!("marker_note: {}", plan.marker.note_number);
     println!("sync_source: {}", plan.decision.source.as_str());
     println!("sync_reason: {}", plan.decision.reason);
+    if plan.decision.source == SyncSource::AutoMerge {
+        println!(
+            "sync_marker_contributed: {}",
+            plan.decision.marker_contributed
+        );
+        println!(
+            "sync_frontmatter_contributed: {}",
+            plan.decision.frontmatter_contributed
+        );
+    }
     if let Some(count) = plan.rendered_highlights_count {
         println!("highlights_count: {count}");
     }
@@ -684,6 +784,9 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
             .unwrap_or_else(|| "none".to_string())
     );
     println!("  sync_source: {}", plan.decision.source.as_str());
+    if plan.decision.source == SyncSource::AutoMerge {
+        println!("  sync_reason: {}", plan.decision.reason);
+    }
     println!("  note_action: {}", plan.stable_note_action);
     println!(
         "  pdf_marker_action: {}",
@@ -868,7 +971,7 @@ fn doctor_vault(config: &Config) -> Result<()> {
             println!("git: fail (dirty worktree)");
             println!("git_dirty_count: {}", entries.len());
             for entry in entries.iter().take(20) {
-                println!("  {entry}");
+                println!("  {}", entry.raw);
             }
             failures
                 .push(format!("vault has {} dirty Git path(s)", entries.len()));
@@ -1016,9 +1119,10 @@ fn ensure_safe_to_write<'a, I>(config: &Config, plans: I) -> Result<()>
 where
     I: IntoIterator<Item = &'a PdfSyncPlan>,
 {
+    let plans = plans.into_iter().collect::<Vec<_>>();
     let mut touched_paths = BTreeSet::new();
-    for plan in plans {
-        if plan.stable_note_action != "none" {
+    for plan in &plans {
+        if note_write_planned(plan) {
             touched_paths.insert(plan.note_path.clone());
         }
         if plan.marker_write_needed {
@@ -1037,13 +1141,94 @@ where
 
     match git_status(config, &touched_paths)? {
         GitStatus::Worktree { entries } if !entries.is_empty() => {
-            Err(CommandError::new(format!(
-                "refusing to modify dirty vault files:\n  {}\ncommit, stash, or clean these files before rerunning",
-                entries.join("\n  ")
-            )))
+            let mut refused = Vec::new();
+            for entry in &entries {
+                if !dirty_entry_allowed_for_plans(config, &plans, entry)? {
+                    refused.push(entry.raw.clone());
+                }
+            }
+            if refused.is_empty() {
+                Ok(())
+            } else {
+                Err(CommandError::new(format!(
+                    "refusing to modify dirty vault files:\n  {}\ncommit, stash, or clean these files before rerunning",
+                    refused.join("\n  ")
+                )))
+            }
         }
         _ => Ok(()),
     }
+}
+
+fn note_write_planned(plan: &PdfSyncPlan) -> bool {
+    plan.stable_note_action != "none" || plan.marker_write_needed
+}
+
+fn dirty_entry_allowed_for_plans(
+    config: &Config,
+    plans: &[&PdfSyncPlan],
+    entry: &GitStatusEntry,
+) -> Result<bool> {
+    if entry.index_status != ' ' || entry.worktree_status != 'M' {
+        return Ok(false);
+    }
+
+    let path = config.bob_dir.join(&entry.path);
+    let Some(plan) = plans.iter().find(|plan| plan.note_path == path) else {
+        return Ok(false);
+    };
+    if !note_write_planned(plan) || !plan.decision.frontmatter_contributed {
+        return Ok(false);
+    }
+    if path.strip_prefix(&config.ref_dir).is_err() {
+        return Ok(false);
+    }
+    if !note_contents_match_plan(&path, plan.note.contents().as_deref())? {
+        return Ok(false);
+    }
+
+    let Some(head_contents) = git_head_contents(config, &path)? else {
+        return Ok(false);
+    };
+    let current_contents = fs::read_to_string(&path).map_err(|error| {
+        CommandError::new(format!("read note {}: {error}", path.display()))
+    })?;
+    Ok(changes_confined_to_frontmatter(
+        &head_contents,
+        &current_contents,
+    ))
+}
+
+fn git_head_contents(config: &Config, path: &Path) -> Result<Option<String>> {
+    let child_env = ob::child_env();
+    let relative = path.strip_prefix(&config.bob_dir).unwrap_or(path);
+    let Some(relative) = relative.to_str() else {
+        return Ok(None);
+    };
+    let output = ob::git_command(&config.bob_dir, &child_env)
+        .arg("show")
+        .arg(format!("HEAD:{relative}"))
+        .output()
+        .map_err(|error| {
+            CommandError::new(format!(
+                "read HEAD version of {}: {error}",
+                path.display()
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
+    }
+    Ok(None)
+}
+
+fn changes_confined_to_frontmatter(base: &str, current: &str) -> bool {
+    let Some((_, base_body)) = split_frontmatter(base) else {
+        return false;
+    };
+    let Some((_, current_body)) = split_frontmatter(current) else {
+        return false;
+    };
+    base_body == current_body
 }
 
 fn git_status(config: &Config, paths: &[PathBuf]) -> Result<GitStatus> {
@@ -1099,8 +1284,26 @@ fn git_status(config: &Config, paths: &[PathBuf]) -> Result<GitStatus> {
     Ok(GitStatus::Worktree {
         entries: String::from_utf8_lossy(&output.stdout)
             .lines()
-            .map(str::to_string)
+            .filter_map(parse_git_status_entry)
             .collect(),
+    })
+}
+
+fn parse_git_status_entry(line: &str) -> Option<GitStatusEntry> {
+    if line.len() < 4 {
+        return None;
+    }
+    let mut chars = line.chars();
+    let index_status = chars.next()?;
+    let worktree_status = chars.next()?;
+    if chars.next()? != ' ' {
+        return None;
+    }
+    Some(GitStatusEntry {
+        index_status,
+        worktree_status,
+        path: PathBuf::from(&line[3..]),
+        raw: line.to_string(),
     })
 }
 
@@ -1703,23 +1906,34 @@ fn normalized_identity_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn decide_sync_source(
-    last_hash: Option<&str>,
-    marker_hash: &str,
-    frontmatter_hash: &str,
-    note_exists: bool,
-    prefer: Option<Prefer>,
-) -> Result<SyncDecision> {
+fn resolve_sync_projection(inputs: SyncInputs<'_>) -> Result<SyncResolution> {
+    let SyncInputs {
+        last_hash,
+        base_projection,
+        marker_projection,
+        marker_hash,
+        frontmatter_projection,
+        frontmatter_hash,
+        note_exists,
+        prefer,
+    } = inputs;
+
     let Some(last_hash) = last_hash else {
         return Ok(match prefer {
-            Some(Prefer::Frontmatter) if note_exists => SyncDecision {
-                source: SyncSource::Frontmatter,
-                reason: "initial sync; --prefer frontmatter supplied",
-            },
-            _ => SyncDecision {
-                source: SyncSource::Marker,
-                reason: "initial sync",
-            },
+            Some(Prefer::Frontmatter) if note_exists => sync_resolution(
+                SyncSource::Frontmatter,
+                "initial sync; --prefer frontmatter supplied",
+                frontmatter_projection.clone(),
+                false,
+                true,
+            ),
+            _ => sync_resolution(
+                SyncSource::Marker,
+                "initial sync",
+                marker_projection.clone(),
+                true,
+                false,
+            ),
         });
     };
 
@@ -1727,35 +1941,198 @@ fn decide_sync_source(
     let frontmatter_changed = frontmatter_hash != last_hash;
 
     match (marker_changed, frontmatter_changed) {
-        (false, false) => Ok(SyncDecision {
-            source: SyncSource::Marker,
-            reason: "marker and frontmatter match the stored hash",
-        }),
-        (true, false) => Ok(SyncDecision {
-            source: SyncSource::Marker,
-            reason: "marker changed since last sync",
-        }),
-        (false, true) => Ok(SyncDecision {
-            source: SyncSource::Frontmatter,
-            reason: "frontmatter changed since last sync",
-        }),
-        (true, true) if marker_hash == frontmatter_hash => Ok(SyncDecision {
-            source: SyncSource::Marker,
-            reason: "marker and frontmatter changed to the same projection",
-        }),
+        (false, false) => Ok(sync_resolution(
+            SyncSource::Marker,
+            "marker and frontmatter match the stored hash",
+            marker_projection.clone(),
+            false,
+            false,
+        )),
+        (true, false) => Ok(sync_resolution(
+            SyncSource::Marker,
+            "marker changed since last sync",
+            marker_projection.clone(),
+            true,
+            false,
+        )),
+        (false, true) => Ok(sync_resolution(
+            SyncSource::Frontmatter,
+            "frontmatter changed since last sync",
+            frontmatter_projection.clone(),
+            false,
+            true,
+        )),
+        (true, true) if marker_hash == frontmatter_hash => Ok(sync_resolution(
+            SyncSource::Marker,
+            "marker and frontmatter changed to the same projection",
+            marker_projection.clone(),
+            true,
+            true,
+        )),
         (true, true) => match prefer {
-            Some(Prefer::Marker) => Ok(SyncDecision {
-                source: SyncSource::Marker,
-                reason: "conflict overridden with --prefer marker",
-            }),
-            Some(Prefer::Frontmatter) => Ok(SyncDecision {
-                source: SyncSource::Frontmatter,
-                reason: "conflict overridden with --prefer frontmatter",
-            }),
-            None => Err(CommandError::new(format!(
-                "marker/frontmatter conflict: marker hash {marker_hash}, frontmatter hash {frontmatter_hash}, stored hash {last_hash}; rerun with --prefer marker or --prefer frontmatter after reviewing both sides"
-            ))),
+            Some(Prefer::Marker) => Ok(sync_resolution(
+                SyncSource::Marker,
+                "conflict overridden with --prefer marker",
+                marker_projection.clone(),
+                true,
+                false,
+            )),
+            Some(Prefer::Frontmatter) => Ok(sync_resolution(
+                SyncSource::Frontmatter,
+                "conflict overridden with --prefer frontmatter",
+                frontmatter_projection.clone(),
+                false,
+                true,
+            )),
+            None => {
+                let Some(base_projection) = base_projection else {
+                    return Err(CommandError::new(format!(
+                        "marker/frontmatter conflict: marker hash {marker_hash}, frontmatter hash {frontmatter_hash}, stored hash {last_hash}; rerun with --prefer marker or --prefer frontmatter after reviewing both sides"
+                    )));
+                };
+                let merge = merge_projection_changes(
+                    base_projection,
+                    marker_projection,
+                    frontmatter_projection,
+                );
+                if !merge.conflicts.is_empty() {
+                    return Err(marker_frontmatter_conflict_error(
+                        &merge.conflicts,
+                    ));
+                }
+                Ok(sync_resolution(
+                    SyncSource::AutoMerge,
+                    "marker and frontmatter changed compatible fields; auto-merged",
+                    merge.projection,
+                    merge.marker_contributed,
+                    merge.frontmatter_contributed,
+                ))
+            }
         },
+    }
+}
+
+fn sync_resolution(
+    source: SyncSource,
+    reason: impl Into<String>,
+    projection: Projection,
+    marker_contributed: bool,
+    frontmatter_contributed: bool,
+) -> SyncResolution {
+    SyncResolution {
+        decision: SyncDecision {
+            source,
+            reason: reason.into(),
+            marker_contributed,
+            frontmatter_contributed,
+        },
+        projection,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionMerge {
+    projection: Projection,
+    conflicts: Vec<ProjectionConflict>,
+    marker_contributed: bool,
+    frontmatter_contributed: bool,
+}
+
+fn merge_projection_changes(
+    base: &Projection,
+    marker: &Projection,
+    frontmatter: &Projection,
+) -> ProjectionMerge {
+    let mut keys = BTreeSet::new();
+    keys.extend(base.keys().cloned());
+    keys.extend(marker.keys().cloned());
+    keys.extend(frontmatter.keys().cloned());
+
+    let mut projection = Projection::new();
+    let mut conflicts = Vec::new();
+    let mut marker_contributed = false;
+    let mut frontmatter_contributed = false;
+
+    for key in keys {
+        let base_value = base.get(&key);
+        let marker_value = marker.get(&key);
+        let frontmatter_value = frontmatter.get(&key);
+        let marker_changed = marker_value != base_value;
+        let frontmatter_changed = frontmatter_value != base_value;
+
+        marker_contributed |= marker_changed;
+        frontmatter_contributed |= frontmatter_changed;
+
+        let selected = match (marker_changed, frontmatter_changed) {
+            (false, false) => base_value,
+            (true, false) => marker_value,
+            (false, true) => frontmatter_value,
+            (true, true) if marker_value == frontmatter_value => marker_value,
+            (true, true) => {
+                conflicts.push(ProjectionConflict {
+                    key,
+                    base: base_value.cloned(),
+                    marker: marker_value.cloned(),
+                    frontmatter: frontmatter_value.cloned(),
+                });
+                continue;
+            }
+        };
+
+        if let Some(value) = selected {
+            projection.insert(key, value.clone());
+        }
+    }
+
+    ProjectionMerge {
+        projection,
+        conflicts,
+        marker_contributed,
+        frontmatter_contributed,
+    }
+}
+
+fn marker_frontmatter_conflict_error(
+    conflicts: &[ProjectionConflict],
+) -> CommandError {
+    let mut message = String::from("marker/frontmatter conflict:");
+    for conflict in conflicts.iter().take(8) {
+        message.push_str(&format!(
+            "\n  {}: marker={}, frontmatter={}, base={}",
+            conflict.key,
+            diagnostic_projection_value(conflict.marker.as_ref()),
+            diagnostic_projection_value(conflict.frontmatter.as_ref()),
+            diagnostic_projection_value(conflict.base.as_ref()),
+        ));
+    }
+    if conflicts.len() > 8 {
+        message.push_str(&format!(
+            "\n  ... {} more conflict(s)",
+            conflicts.len() - 8
+        ));
+    }
+    message.push_str(
+        "\nrerun with --prefer marker or --prefer frontmatter after reviewing both sides",
+    );
+    CommandError::new(message)
+}
+
+fn diagnostic_projection_value(value: Option<&MarkerValue>) -> String {
+    let rendered = match value {
+        Some(MarkerValue::String(value)) => quote_string(value),
+        Some(value) => value.as_marker_value(),
+        None => "<deleted>".to_string(),
+    };
+    truncate_diagnostic_value(&rendered, 80)
+}
+
+fn truncate_diagnostic_value(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 
@@ -1942,6 +2319,7 @@ impl SyncSource {
         match self {
             SyncSource::Marker => "marker",
             SyncSource::Frontmatter => "frontmatter",
+            SyncSource::AutoMerge => "auto-merge",
         }
     }
 }
@@ -2003,6 +2381,7 @@ impl ParsedNote {
         Self {
             frontmatter: Vec::new(),
             body: String::new(),
+            original: None,
         }
     }
 
@@ -2011,7 +2390,11 @@ impl ParsedNote {
     }
 
     fn contents(&self) -> Option<String> {
-        self.exists().then(|| self.render_original())
+        self.exists().then(|| {
+            self.original
+                .clone()
+                .unwrap_or_else(|| self.render_original())
+        })
     }
 
     fn render_original(&self) -> String {
@@ -2034,6 +2417,27 @@ impl ParsedNote {
                 .then(|| entry.value.as_ref()?.as_string().map(str::to_string))
                 .flatten()
         })
+    }
+
+    fn marker_base_projection(&self) -> Result<Option<Projection>> {
+        let Some(entry) = self
+            .frontmatter
+            .iter()
+            .find(|entry| entry.key.as_deref() == Some(FIELD_MARKER_BASE))
+        else {
+            return Ok(None);
+        };
+        let Some(value) = &entry.value else {
+            return Err(CommandError::new(format!(
+                "{FIELD_MARKER_BASE} must be a compact JSON string"
+            )));
+        };
+        let Some(json) = value.as_string() else {
+            return Err(CommandError::new(format!(
+                "{FIELD_MARKER_BASE} must be a compact JSON string"
+            )));
+        };
+        projection_from_snapshot_json(json).map(Some)
     }
 
     fn marker_fields(&self) -> BTreeSet<String> {
@@ -2157,6 +2561,11 @@ impl ParsedNote {
         lines.push(format!(
             "{FIELD_MARKER_HASH}: {}",
             MarkerValue::String(marker_hash.to_string()).as_frontmatter_value()
+        ));
+        lines.push(format!(
+            "{FIELD_MARKER_BASE}: {}",
+            MarkerValue::String(projection_snapshot_json(projection))
+                .as_frontmatter_value()
         ));
         if !marker_fields.is_empty() {
             let value = MarkerValue::List(
@@ -2893,6 +3302,7 @@ fn parse_note(contents: &str) -> ParsedNote {
         return ParsedNote {
             frontmatter: Vec::new(),
             body: contents.to_string(),
+            original: Some(contents.to_string()),
         };
     };
     ParsedNote {
@@ -2901,6 +3311,7 @@ fn parse_note(contents: &str) -> ParsedNote {
             .map(|raw| parse_frontmatter_entry(&raw))
             .collect(),
         body,
+        original: Some(contents.to_string()),
     }
 }
 
@@ -3000,6 +3411,77 @@ fn unknown_synced_fields(projection: &Projection) -> Vec<String> {
         .filter(|key| !is_standard_user_field(key))
         .cloned()
         .collect()
+}
+
+fn projection_snapshot_json(projection: &Projection) -> String {
+    let mut object = serde_json::Map::new();
+    for (key, value) in projection {
+        object.insert(key.clone(), marker_value_to_json(value));
+    }
+    serde_json::to_string(&serde_json::Value::Object(object))
+        .expect("serializing marker projection snapshot cannot fail")
+}
+
+fn projection_from_snapshot_json(contents: &str) -> Result<Projection> {
+    let value = serde_json::from_str::<serde_json::Value>(contents).map_err(
+        |error| {
+            CommandError::new(format!(
+                "parse {FIELD_MARKER_BASE} JSON projection: {error}"
+            ))
+        },
+    )?;
+    let serde_json::Value::Object(object) = value else {
+        return Err(CommandError::new(format!(
+            "{FIELD_MARKER_BASE} must be a JSON object"
+        )));
+    };
+
+    let mut projection = Projection::new();
+    for (key, value) in object {
+        let key = normalize_key(&key);
+        if key.is_empty() {
+            return Err(CommandError::new(format!(
+                "{FIELD_MARKER_BASE} contains an empty key"
+            )));
+        }
+        projection.insert(key, marker_value_from_json(value)?);
+    }
+    canonicalize_parent(&mut projection, FIELD_MARKER_BASE)?;
+    Ok(projection)
+}
+
+fn marker_value_to_json(value: &MarkerValue) -> serde_json::Value {
+    match value {
+        MarkerValue::Null => serde_json::Value::Null,
+        MarkerValue::Bool(value) => serde_json::Value::Bool(*value),
+        MarkerValue::Number(value) => {
+            serde_json::from_str::<serde_json::Value>(value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        MarkerValue::String(value) => serde_json::Value::String(value.clone()),
+        MarkerValue::List(values) => serde_json::Value::Array(
+            values.iter().map(marker_value_to_json).collect(),
+        ),
+    }
+}
+
+fn marker_value_from_json(value: serde_json::Value) -> Result<MarkerValue> {
+    match value {
+        serde_json::Value::Null => Ok(MarkerValue::Null),
+        serde_json::Value::Bool(value) => Ok(MarkerValue::Bool(value)),
+        serde_json::Value::Number(value) => {
+            Ok(MarkerValue::Number(value.to_string()))
+        }
+        serde_json::Value::String(value) => Ok(MarkerValue::String(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(marker_value_from_json)
+            .collect::<Result<Vec<_>>>()
+            .map(MarkerValue::List),
+        serde_json::Value::Object(_) => Err(CommandError::new(format!(
+            "{FIELD_MARKER_BASE} contains a nested object, which marker projections do not support"
+        ))),
+    }
 }
 
 fn projection_hash(projection: &Projection) -> Result<String> {
@@ -3195,6 +3677,17 @@ mod tests {
         SidecarAnnotationKind,
     };
 
+    fn string_value(value: &str) -> MarkerValue {
+        MarkerValue::String(value.to_string())
+    }
+
+    fn test_projection(entries: Vec<(&str, MarkerValue)>) -> Projection {
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect()
+    }
+
     #[test]
     fn relative_config_paths_resolve_under_bob_dir() {
         let bob_dir = Path::new("/tmp/bob");
@@ -3213,11 +3706,182 @@ mod tests {
     fn pipeline_fields_exclude_marker_user_projection() {
         assert!(super::PIPELINE_FIELDS.contains(&"source_pdf"));
         assert!(super::PIPELINE_FIELDS.contains(&"highlights_marker_hash"));
+        assert!(super::PIPELINE_FIELDS.contains(&"highlights_marker_base"));
         assert!(!super::PIPELINE_FIELDS.contains(&"status"));
         assert!(!super::PIPELINE_FIELDS.contains(&"parent"));
         assert!(!super::PIPELINE_FIELDS.contains(&"type"));
         assert!(super::is_command_managed_field("type"));
         assert!(super::is_command_managed_field("ref_type"));
+    }
+
+    #[test]
+    fn projection_snapshot_json_round_trips_compact_user_projection() {
+        let projection = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+            ("title", string_value("Systems Performance")),
+            (
+                "aliases",
+                MarkerValue::List(vec![
+                    string_value("SP"),
+                    string_value("systems perf"),
+                ]),
+            ),
+            ("pages", MarkerValue::Number("42".to_string())),
+        ]);
+
+        let snapshot = super::projection_snapshot_json(&projection);
+        assert_eq!(
+            snapshot,
+            r#"{"aliases":["SP","systems perf"],"pages":42,"parent":"[[obsidian]]","status":"wip","title":"Systems Performance"}"#
+        );
+        assert_eq!(
+            super::projection_from_snapshot_json(&snapshot)
+                .expect("parse snapshot"),
+            projection
+        );
+
+        let canonicalized = super::projection_from_snapshot_json(
+            r#"{"parent":"obsidian","status":"wip"}"#,
+        )
+        .expect("parse bare parent snapshot");
+        assert_eq!(
+            canonicalized.get("parent"),
+            Some(&string_value("[[obsidian]]"))
+        );
+    }
+
+    #[test]
+    fn projection_three_way_merge_handles_compatible_changes() {
+        let base = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+            ("title", string_value("Old")),
+        ]);
+
+        let marker_only = super::merge_projection_changes(
+            &base,
+            &test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+            &base,
+        );
+        assert!(marker_only.conflicts.is_empty());
+        assert_eq!(
+            marker_only.projection.get("status"),
+            Some(&string_value("done"))
+        );
+        assert!(marker_only.marker_contributed);
+        assert!(!marker_only.frontmatter_contributed);
+
+        let frontmatter_only = super::merge_projection_changes(
+            &base,
+            &base,
+            &test_projection(vec![
+                ("status", string_value("wip")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("New")),
+            ]),
+        );
+        assert!(frontmatter_only.conflicts.is_empty());
+        assert_eq!(
+            frontmatter_only.projection.get("title"),
+            Some(&string_value("New"))
+        );
+        assert!(!frontmatter_only.marker_contributed);
+        assert!(frontmatter_only.frontmatter_contributed);
+
+        let same_value = super::merge_projection_changes(
+            &base,
+            &test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+            &test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+        );
+        assert!(same_value.conflicts.is_empty());
+        assert_eq!(
+            same_value.projection.get("status"),
+            Some(&string_value("done"))
+        );
+        assert!(same_value.marker_contributed);
+        assert!(same_value.frontmatter_contributed);
+
+        let non_overlapping = super::merge_projection_changes(
+            &base,
+            &test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+            &test_projection(vec![
+                ("status", string_value("wip")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("New")),
+            ]),
+        );
+        assert!(non_overlapping.conflicts.is_empty());
+        assert_eq!(
+            non_overlapping.projection,
+            test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("New")),
+            ])
+        );
+    }
+
+    #[test]
+    fn projection_three_way_merge_handles_deletes_and_conflicts() {
+        let base = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+            ("title", string_value("Old")),
+        ]);
+        let without_title = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+
+        let delete_vs_unchanged =
+            super::merge_projection_changes(&base, &without_title, &base);
+        assert!(delete_vs_unchanged.conflicts.is_empty());
+        assert!(!delete_vs_unchanged.projection.contains_key("title"));
+
+        let delete_vs_change = super::merge_projection_changes(
+            &base,
+            &without_title,
+            &test_projection(vec![
+                ("status", string_value("wip")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("New")),
+            ]),
+        );
+        assert_eq!(delete_vs_change.conflicts.len(), 1);
+        assert_eq!(delete_vs_change.conflicts[0].key, "title");
+
+        let same_key_different_value = super::merge_projection_changes(
+            &base,
+            &test_projection(vec![
+                ("status", string_value("done")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+            &test_projection(vec![
+                ("status", string_value("paused")),
+                ("parent", string_value("[[obsidian]]")),
+                ("title", string_value("Old")),
+            ]),
+        );
+        assert_eq!(same_key_different_value.conflicts.len(), 1);
+        assert_eq!(same_key_different_value.conflicts[0].key, "status");
     }
 
     #[test]

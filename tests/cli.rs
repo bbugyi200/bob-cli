@@ -1394,6 +1394,7 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
         "top-level library PDFs should not derive ref_type:\n{contents}"
     );
     assert!(contents.contains("highlights_marker_hash: "), "{contents}");
+    assert!(contents.contains("highlights_marker_base: "), "{contents}");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -2045,6 +2046,48 @@ fn highlights_ref_sync_refuses_dirty_target_note_before_writing() {
 }
 
 #[test]
+fn highlights_ref_sync_allows_dirty_tracked_frontmatter_writeback() {
+    let temp = TempDir::new("bob-cli-highlights-ref-dirty-frontmatter");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights-ref sync"),
+    );
+    git_in(&vault, ["init", "-q"]);
+    git_in(&vault, ["config", "user.name", "Test User"]);
+    git_in(&vault, ["config", "user.email", "test@example.com"]);
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial sync"]);
+    let edited = fs::read_to_string(&note)
+        .expect("read ref note")
+        .replace("status: wip", "status: complete");
+    write_file(&note, &edited);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync dirty frontmatter");
+
+    assert_success(&output);
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: complete\n"), "{marker}");
+    let contents = fs::read_to_string(&note).expect("read updated note");
+    assert!(contents.contains("status: complete\n"), "{contents}");
+}
+
+#[test]
 fn highlights_ref_doctor_checks_vault_git_and_ob_without_writes() {
     let temp = TempDir::new("bob-cli-highlights-ref-doctor");
     let stub_bin = temp.path().join("bin");
@@ -2232,6 +2275,97 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
 }
 
 #[test]
+fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
+    let temp = TempDir::new("bob-cli-highlights-ref-auto-merge");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights-ref sync"),
+    );
+
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
+    let edited = fs::read_to_string(&note).expect("read ref note").replace(
+        "parent: \"[[obsidian]]\"\n",
+        "parent: \"[[obsidian]]\"\ntitle: \"Frontmatter Title\"\n",
+    );
+    write_file(&note, &edited);
+    let note_before = fs::read_to_string(&note).expect("read note before");
+    let marker_before = pdf_marker_contents(&pdf);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run auto-merge");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("sync_source: auto-merge")
+            && stdout(&output).contains("pdf_marker_action: would-update")
+            && stdout(&output).contains("writes: none"),
+        "expected dry-run auto-merge report:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(fs::read_to_string(&note).expect("read note"), note_before);
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("write auto-merge");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("sync_source: auto-merge"),
+        "expected auto-merge report:\n{}",
+        format_output(&output)
+    );
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(
+        marker.contains("- title: \"Frontmatter Title\"\n"),
+        "{marker}"
+    );
+    let note_after = fs::read_to_string(&note).expect("read merged note");
+    assert!(note_after.contains("status: done\n"), "{note_after}");
+    assert!(
+        note_after.contains("title: \"Frontmatter Title\"\n"),
+        "{note_after}"
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync after auto-merge");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "auto-merge should settle in one write:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
 fn highlights_ref_frontmatter_missing_parent_fails_before_pdf_writeback() {
     let temp =
         TempDir::new("bob-cli-highlights-ref-frontmatter-missing-parent");
@@ -2323,6 +2457,13 @@ fn highlights_ref_conflicting_edits_fail_and_prefer_frontmatter_resolves() {
     assert!(
         stderr(&output).contains("marker/frontmatter conflict"),
         "expected conflict report:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("status: marker=\"marker-side\"")
+            && stderr(&output).contains("frontmatter=\"frontmatter-side\"")
+            && stderr(&output).contains("base=\"wip\""),
+        "expected field-level conflict report:\n{}",
         format_output(&output)
     );
     assert_eq!(
