@@ -176,6 +176,78 @@ done_tasks: \"[[done/obsidian_done]]\"
 }
 
 #[test]
+fn collect_done_commits_link_repairs_with_collection_changes() {
+    let temp = TempDir::new("bob-cli-collect-done-link-repair-git");
+    let stub_bin = temp.path().join("bin");
+    let (vault, remote) = init_git_vault_with_remote(&temp);
+    let source = vault.join("obsidian.md");
+    let daily = vault.join("daily.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    write_successful_ob_stub(&stub_bin);
+    write_file(
+        &source,
+        "\
+- [x] done #task ^abc123
+- [ ] active #task
+",
+    );
+    write_file(
+        &daily,
+        "Links [[obsidian#^abc123|alias]] and ![[obsidian#^abc123]].\n",
+    );
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=1")
+        .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done with link repair");
+
+    assert_success(&output);
+    let output_text = stdout(&output);
+    assert!(
+        output_text.contains("Obsidian links repaired: 2")
+            && output_text.contains("link-repair files updated: 1")
+            && output_text.contains("committed: bob collect-done 2026-06-02")
+            && output_text.contains("pushed"),
+        "expected link repair commit and push:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&daily).expect("read daily"),
+        "Links [[done/obsidian_done#^abc123|alias]] and ![[done/obsidian_done#^abc123]].\n"
+    );
+    assert!(
+        fs::read_to_string(&archive)
+            .expect("read archive")
+            .contains("- [x] done #task ^abc123"),
+        "expected archived task"
+    );
+
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        show.contains("\nobsidian.md\n")
+            && show.contains("\ndone/obsidian_done.md\n")
+            && show.contains("\ndaily.md\n"),
+        "expected source, archive, and link repair note in commit:\n{show}"
+    );
+    let remote_head =
+        stdout(&git(["--git-dir", path_str(&remote), "rev-parse", "HEAD"]));
+    let local_head = stdout(&git_in(&vault, ["rev-parse", "HEAD"]));
+    assert_eq!(remote_head, local_head, "push should update bare remote");
+}
+
+#[test]
 fn collect_done_commits_metadata_only_source_updates() {
     let temp = TempDir::new("bob-cli-collect-done-git-metadata");
     let stub_bin = temp.path().join("bin");
@@ -407,6 +479,68 @@ done_tasks: \"[[done/obsidian_done]]\"
 
 - [ ] active #task
 "
+    );
+}
+
+#[test]
+fn collect_done_refuses_dirty_link_repair_files_before_mutation() {
+    let temp = TempDir::new("bob-cli-collect-done-dirty-link-repair");
+    let stub_bin = temp.path().join("bin");
+    let vault = temp.path().join("vault");
+    let source = vault.join("obsidian.md");
+    let daily = vault.join("daily.md");
+    let archive = vault.join("done/obsidian_done.md");
+    fs::create_dir_all(&stub_bin).expect("create stub bin");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_successful_ob_stub(&stub_bin);
+    git_in(&vault, ["init", "-q"]);
+    git_in(&vault, ["config", "user.name", "Test User"]);
+    git_in(&vault, ["config", "user.email", "test@example.com"]);
+    let source_contents = "\
+- [x] done #task ^abc123
+- [ ] active #task
+";
+    write_file(&source, source_contents);
+    write_file(&daily, "Reference [[obsidian#^abc123]].\n");
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    let dirty_daily = "Reference [[obsidian#^abc123]].\nlocal edit\n";
+    write_file(&daily, dirty_daily);
+
+    let output = bob_command()
+        .arg("collect-done")
+        .arg("--threshold=1")
+        .env("BOB_DIR", &vault)
+        .env("PATH", path_with_prefix(&stub_bin))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob collect-done with dirty link repair candidate");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected dirty link repair candidate failure:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output)
+            .contains("refusing: pre-existing changes in candidate files"),
+        "expected dirty candidate stdout:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("daily.md"),
+        "expected dirty link repair path in stderr:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&source).expect("read source"),
+        source_contents
+    );
+    assert_eq!(fs::read_to_string(&daily).expect("read daily"), dirty_daily);
+    assert!(
+        !archive.exists(),
+        "archive should not be created when link repair candidate is dirty"
     );
 }
 
