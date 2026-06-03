@@ -53,6 +53,23 @@ pub(crate) fn sync_vault(
     vault: &Path,
     child_env: &ChildEnv,
 ) -> Result<SyncOutcome, i32> {
+    sync_vault_with_output(vault, child_env, SyncOutputTarget::Stdout)
+}
+
+/// Run the shared sync gate while routing successful sync/status output to
+/// stderr, for commands that reserve stdout for machine-readable data.
+pub(crate) fn sync_vault_to_stderr(
+    vault: &Path,
+    child_env: &ChildEnv,
+) -> Result<SyncOutcome, i32> {
+    sync_vault_with_output(vault, child_env, SyncOutputTarget::Stderr)
+}
+
+fn sync_vault_with_output(
+    vault: &Path,
+    child_env: &ChildEnv,
+    output_target: SyncOutputTarget,
+) -> Result<SyncOutcome, i32> {
     let Some(ob_command) = load_ob_command() else {
         return Ok(SyncOutcome::SkippedMissingCommand);
     };
@@ -85,14 +102,19 @@ pub(crate) fn sync_vault(
         return Err(bob_env::exit_code(output.status));
     }
 
-    write_stdout_output(&sync_output);
-    run_sync_status(&ob_command, child_env, vault);
+    output_target.write(&sync_output);
+    run_sync_status(&ob_command, child_env, vault, output_target);
     Ok(SyncOutcome::Ran)
 }
 
 /// Run `ob sync-status` for visibility. Its result is informational only, so a
 /// failure here never aborts the run.
-fn run_sync_status(ob_command: &OsStr, child_env: &ChildEnv, vault: &Path) {
+fn run_sync_status(
+    ob_command: &OsStr,
+    child_env: &ChildEnv,
+    vault: &Path,
+    output_target: SyncOutputTarget,
+) {
     let output = ob_command_builder(ob_command, child_env)
         .arg("sync-status")
         .arg("--path")
@@ -104,9 +126,24 @@ fn run_sync_status(ob_command: &OsStr, child_env: &ChildEnv, vault: &Path) {
     if let Ok(output) = output {
         let status_output = merged_output(&output);
         if output.status.success() {
-            write_stdout_output(&status_output);
+            output_target.write(&status_output);
         } else {
             write_stderr_output(&status_output);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SyncOutputTarget {
+    Stdout,
+    Stderr,
+}
+
+impl SyncOutputTarget {
+    fn write(self, output: &str) {
+        match self {
+            Self::Stdout => write_stdout_output(output),
+            Self::Stderr => write_stderr_output(output),
         }
     }
 }

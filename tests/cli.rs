@@ -882,6 +882,233 @@ fn dataview_obsidian_reports_not_running_without_javascript_blob() {
 }
 
 #[test]
+fn dataview_sync_runs_ob_with_bob_dir_and_keeps_stdout_clean() {
+    let temp = TempDir::new("bob-cli-dataview-sync");
+    let vault = temp.path().join("vault");
+    let ob = temp.path().join("ob");
+    let obsidian = temp.path().join("obsidian");
+    let ob_log = temp.path().join("ob.log");
+    let obsidian_log = temp.path().join("obsidian.log");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_executable(
+        &ob,
+        r#"#!/bin/sh
+printf 'ob %s\n' "$*" >> "$OB_LOG"
+case "$1" in
+  sync)
+    printf 'sync stdout\n'
+    printf 'sync stderr\n' >&2
+    exit 0
+    ;;
+  sync-status)
+    printf 'status stdout\n'
+    exit 0
+    ;;
+esac
+exit 64
+"#,
+    );
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"source_paths","paths":["Projects/alpha.md"],"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--source")
+        .arg("#project")
+        .arg("--sync")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("OB_COMMAND", &ob)
+        .env("OB_LOG", &ob_log)
+        .env("STUB_LOG", &obsidian_log)
+        .output()
+        .expect("run synced bob dataview query");
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/alpha.md\n",
+        "sync logs must not pollute paths stdout:\n{}",
+        format_output(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("sync stdout")
+            && err.contains("sync stderr")
+            && err.contains("status stdout"),
+        "sync and sync-status output should be visible on stderr:\n{}",
+        format_output(&output)
+    );
+
+    let ob_log = fs::read_to_string(&ob_log).expect("read ob log");
+    let sync_call = format!("ob sync --path {}", path_str(&vault));
+    let status_call = format!("ob sync-status --path {}", path_str(&vault));
+    assert_text_order(&ob_log, &[&sync_call, &status_call]);
+}
+
+#[test]
+fn dataview_sync_missing_ob_warns_and_continues() {
+    let temp = TempDir::new("bob-cli-dataview-sync-missing-ob");
+    let vault = temp.path().join("vault");
+    let obsidian = temp.path().join("obsidian");
+    let obsidian_log = temp.path().join("obsidian.log");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"source_paths","paths":["Inbox/waiting.md"],"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--source")
+        .arg("#waiting")
+        .arg("--sync")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("OB_COMMAND", temp.path().join("missing-ob"))
+        .env("STUB_LOG", &obsidian_log)
+        .output()
+        .expect("run synced bob dataview query with missing ob");
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Inbox/waiting.md\n",
+        "missing ob warning must not pollute stdout:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("warning: ob command not found"),
+        "missing ob should warn and continue:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn dataview_sync_failure_aborts_before_obsidian_query() {
+    let temp = TempDir::new("bob-cli-dataview-sync-failure");
+    let vault = temp.path().join("vault");
+    let ob = temp.path().join("ob");
+    let obsidian = temp.path().join("obsidian");
+    let obsidian_log = temp.path().join("obsidian.log");
+    fs::create_dir_all(&vault).expect("create vault");
+    write_executable(
+        &ob,
+        "#!/bin/sh\nprintf 'sync exploded\\n' >&2\nexit 42\n",
+    );
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"source_paths","paths":["Projects/alpha.md"],"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .arg("--format")
+        .arg("json")
+        .arg("--source")
+        .arg("#project")
+        .arg("--sync")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("OB_COMMAND", &ob)
+        .env("STUB_LOG", &obsidian_log)
+        .output()
+        .expect("run synced bob dataview query with sync failure");
+
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "sync failure should return the ob exit code:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output).is_empty(),
+        "sync failure must keep stdout clean:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("sync exploded")
+            && stderr(&output).contains("ob sync failed"),
+        "sync failure should be reported clearly:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !obsidian_log.exists(),
+        "Obsidian must not be queried after sync failure"
+    );
+}
+
+#[test]
+fn dataview_rejects_unsafe_origin_and_missing_bob_dir() {
+    let temp = TempDir::new("bob-cli-dataview-path-validation");
+    let missing_vault = temp.path().join("missing-vault");
+    let cases = [
+        (
+            vec![
+                OsString::from("dataview"),
+                OsString::from("--origin"),
+                OsString::from("../Secret.md"),
+                OsString::from("--query"),
+                OsString::from("LIST FROM #project"),
+            ],
+            "invalid --origin",
+            ".. traversal",
+        ),
+        (
+            vec![
+                OsString::from("dataview"),
+                OsString::from("--origin"),
+                temp.path().join("absolute.md").into_os_string(),
+                OsString::from("--query"),
+                OsString::from("LIST FROM #project"),
+            ],
+            "invalid --origin",
+            "absolute paths are not allowed",
+        ),
+        (
+            vec![
+                OsString::from("dataview"),
+                OsString::from("--bob-dir"),
+                missing_vault.into_os_string(),
+                OsString::from("--query"),
+                OsString::from("LIST FROM #project"),
+            ],
+            "--bob-dir must name an existing Bob vault directory",
+            "missing-vault",
+        ),
+    ];
+
+    for (args, marker, detail) in cases {
+        let output = bob_command()
+            .args(args)
+            .output()
+            .expect("run invalid dataview path case");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "path validation errors should be usage failures:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stdout(&output).is_empty()
+                && stderr(&output).contains(marker)
+                && stderr(&output).contains(detail),
+            "expected path validation error:\n{}",
+            format_output(&output)
+        );
+    }
+}
+
+#[test]
 fn highlights_ref_help_lists_subcommands_alphabetically() {
     let output = bob_command()
         .arg("highlights-ref")

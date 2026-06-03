@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{self, Read},
     iter,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     process::{Command, Output},
     thread,
     time::Duration,
@@ -19,7 +19,7 @@ use clap::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::env as bob_env;
+use super::{env as bob_env, ob};
 
 const COMMAND_NAME: &str = "bob dataview";
 const ENV_OBSIDIAN_COMMAND: &str = "BOB_DATAVIEW_OBSIDIAN_COMMAND";
@@ -276,15 +276,38 @@ fn run_request(request: &Request) -> Result<(), DataviewError> {
 }
 
 fn run_obsidian(request: &Request) -> Result<(), DataviewError> {
+    let eval_request = request.obsidian_eval_request()?;
+
     if request.sync {
-        return Err(DataviewError::SyncNotImplemented);
+        sync_before_query(&request.vault.bob_dir)?;
     }
 
-    let eval_request = request.obsidian_eval_request()?;
     let javascript = build_obsidian_javascript(&eval_request)?;
     let output = run_obsidian_eval(&request.vault, &javascript)?;
     let engine_output = parse_protocol_stdout(&output.stdout)?;
     emit_engine_output(request, engine_output)
+}
+
+fn sync_before_query(bob_dir: &Path) -> Result<(), DataviewError> {
+    let child_env = ob::child_env();
+    match ob::sync_vault_to_stderr(bob_dir, &child_env) {
+        Ok(ob::SyncOutcome::Ran) => Ok(()),
+        Ok(ob::SyncOutcome::SkippedMissingCommand) => {
+            eprintln!(
+                "{COMMAND_NAME}: warning: ob command not found; continuing \
+                 without sync"
+            );
+            Ok(())
+        }
+        Ok(ob::SyncOutcome::AlreadyRunning) => {
+            eprintln!(
+                "{COMMAND_NAME}: warning: another ob sync is already running; \
+                 continuing without a fresh sync"
+            );
+            Ok(())
+        }
+        Err(exit_code) => Err(DataviewError::SyncFailed { exit_code }),
+    }
 }
 
 fn run_obsidian_eval(
@@ -1015,7 +1038,9 @@ enum DataviewError {
     StrictPaths {
         warnings: Vec<String>,
     },
-    SyncNotImplemented,
+    SyncFailed {
+        exit_code: i32,
+    },
 }
 
 impl DataviewError {
@@ -1136,9 +1161,11 @@ impl DataviewError {
                      omit --strict-paths for best-effort path output."
                 );
             }
-            Self::SyncNotImplemented => {
-                eprintln!("{COMMAND_NAME}: --sync is not implemented yet");
-                eprintln!("Run sync separately before querying for now.");
+            Self::SyncFailed { exit_code } => {
+                eprintln!(
+                    "{COMMAND_NAME}: ob sync failed with exit code \
+                     {exit_code}; aborting before Dataview query"
+                );
             }
         }
     }
@@ -1146,7 +1173,8 @@ impl DataviewError {
     fn exit_code(&self) -> i32 {
         match self {
             Self::ObsidianFailed { exit_code, .. }
-            | Self::ObsidianNotRunning { exit_code, .. } => *exit_code,
+            | Self::ObsidianNotRunning { exit_code, .. }
+            | Self::SyncFailed { exit_code } => *exit_code,
             _ => 1,
         }
     }
@@ -1302,6 +1330,7 @@ impl Request {
         let query = QueryInput::from_matches(matches);
         let format = OutputFormat::from_matches(matches);
         let strict_paths = matches.get_flag("strict-paths");
+        let sync = matches.get_flag("sync");
 
         if query.is_source() && format == OutputFormat::Markdown {
             return Err(command.error(
@@ -1321,9 +1350,9 @@ impl Request {
             query,
             format,
             engine: Engine::from_matches(matches),
-            vault: VaultConfig::from_matches(matches),
+            vault: VaultConfig::from_matches(matches, command, sync)?,
             strict_paths,
-            sync: matches.get_flag("sync"),
+            sync,
         })
     }
 
@@ -1458,24 +1487,94 @@ impl Engine {
 }
 
 impl VaultConfig {
-    fn from_matches(matches: &ArgMatches) -> Self {
-        let bob_dir = matches
-            .get_one::<OsString>("bob-dir")
+    fn from_matches(
+        matches: &ArgMatches,
+        command: &mut ClapCommand,
+        sync: bool,
+    ) -> Result<Self, clap::Error> {
+        let bob_dir_arg = matches.get_one::<OsString>("bob-dir");
+        let bob_dir = bob_dir_arg
             .map(PathBuf::from)
             .map(|path| bob_env::expand_tilde(&path))
             .unwrap_or_else(bob_env::bob_dir);
-        let origin = matches.get_one::<OsString>("origin").map(PathBuf::from);
+        if bob_dir_arg.is_some() || sync {
+            validate_bob_dir(&bob_dir, command)?;
+        }
+
+        let origin = matches
+            .get_one::<OsString>("origin")
+            .map(PathBuf::from)
+            .map(|path| {
+                validate_origin_path(&path, command)?;
+                Ok::<PathBuf, clap::Error>(path)
+            })
+            .transpose()?;
         let obsidian_vault = matches
             .get_one::<String>("vault")
             .cloned()
             .or_else(default_vault_from_env);
 
-        Self {
+        Ok(Self {
             bob_dir,
             origin,
             obsidian_vault,
+        })
+    }
+}
+
+fn validate_bob_dir(
+    bob_dir: &Path,
+    command: &mut ClapCommand,
+) -> Result<(), clap::Error> {
+    if bob_dir.is_dir() {
+        return Ok(());
+    }
+
+    Err(command.error(
+        ErrorKind::ValueValidation,
+        format!(
+            "--bob-dir must name an existing Bob vault directory: {}",
+            bob_dir.display()
+        ),
+    ))
+}
+
+fn validate_origin_path(
+    origin: &Path,
+    command: &mut ClapCommand,
+) -> Result<(), clap::Error> {
+    validate_vault_relative_path(origin).map_err(|reason| {
+        command.error(
+            ErrorKind::ValueValidation,
+            format!("invalid --origin {}: {reason}", origin.display()),
+        )
+    })
+}
+
+fn validate_vault_relative_path(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+    if path.is_absolute() {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    if path.to_string_lossy().contains('\0') {
+        return Err("NUL bytes are not allowed".to_string());
+    }
+
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(".. traversal is not allowed".to_string());
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("absolute paths are not allowed".to_string());
+            }
         }
     }
+
+    Ok(())
 }
 
 fn default_vault_from_env() -> Option<String> {
