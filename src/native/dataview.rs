@@ -311,17 +311,25 @@ fn run_dynomark(request: &Request) -> Result<(), DataviewError> {
 }
 
 fn run_native(request: &Request) -> Result<(), DataviewError> {
-    let query = match &request.query {
-        QueryInput::Dql(input) => input.read_query()?,
-        QueryInput::Source(_) => unreachable!(
-            "native source expressions are rejected during argument parsing"
-        ),
-    };
-
-    let query = NativeQuery::parse(&query)?;
     let vault = NativeVault::read(&request.vault.bob_dir)?;
-    let output = vault.evaluate(&query);
-    emit_native_output(request, output)
+    match &request.query {
+        QueryInput::Source(source) => {
+            let source = NativeSourceExpr::parse(source)?;
+            let output = vault.evaluate_source(&source);
+            emit_engine_output(
+                request,
+                EngineOutput {
+                    response: EngineResponse::SourcePaths(output.paths),
+                    warnings: output.warnings,
+                },
+            )
+        }
+        QueryInput::Dql(input) => {
+            let query = NativeQuery::parse(&input.read_query()?)?;
+            let output = vault.evaluate(&query)?;
+            emit_native_output(request, output)
+        }
+    }
 }
 
 fn run_obsidian_eval(
@@ -656,6 +664,9 @@ fn emit_native_output(
                         "values": values,
                     })
                 }
+                NativeResult::Source => unreachable!(
+                    "native source output uses the shared source emitter"
+                ),
                 NativeResult::Table { headers, values } => {
                     serde_json::json!({
                         "type": "table",
@@ -756,6 +767,7 @@ struct NativeOutput {
 
 #[derive(Debug)]
 enum NativeResult {
+    Source,
     List,
     Table {
         headers: Vec<String>,
@@ -766,19 +778,76 @@ enum NativeResult {
 #[derive(Debug)]
 struct NativeQuery {
     kind: NativeQueryKind,
-    source: Option<NativeSource>,
-    filter: Option<NativeExpr>,
+    commands: Vec<NativeDataCommand>,
 }
 
 #[derive(Debug)]
 enum NativeQueryKind {
-    List,
-    Table { columns: Vec<Vec<String>> },
+    List {
+        expression: Option<NativeExpression>,
+        _without_id: bool,
+    },
+    Table {
+        columns: Vec<NativeSelect>,
+        _without_id: bool,
+    },
+    Task {
+        _without_id: bool,
+    },
+    Calendar {
+        _expression: NativeExpression,
+        _without_id: bool,
+    },
 }
 
 #[derive(Debug)]
-struct NativeSource {
-    folder: String,
+struct NativeSelect {
+    expression: NativeExpression,
+    alias: Option<String>,
+}
+
+#[derive(Debug)]
+struct NativeExpression {
+    raw: String,
+    field_chain: Option<Vec<String>>,
+    filter: Option<NativeExpr>,
+}
+
+#[derive(Debug)]
+enum NativeDataCommand {
+    From(NativeSourceExpr),
+    Where(NativeExpression),
+    Sort {
+        expression: NativeExpression,
+        _direction: Option<SortDirection>,
+    },
+    GroupBy {
+        expression: NativeExpression,
+        _alias: Option<String>,
+    },
+    Flatten {
+        expression: NativeExpression,
+        _alias: Option<String>,
+    },
+    Limit(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug)]
+enum NativeSourceExpr {
+    All,
+    And(Box<NativeSourceExpr>, Box<NativeSourceExpr>),
+    IncomingLink(String),
+    Not(Box<NativeSourceExpr>),
+    Or(Box<NativeSourceExpr>, Box<NativeSourceExpr>),
+    OutgoingLink(String),
+    Path(String),
+    Tag(String),
 }
 
 #[derive(Debug)]
@@ -794,6 +863,7 @@ enum NativeExpr {
 enum NativeValue {
     Bool(bool),
     Link(String),
+    Null,
     String(String),
 }
 
@@ -802,24 +872,54 @@ struct NativeVault {
     index: DataviewIndex,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum NativeToken {
     And,
+    As,
+    Asc,
     Bool(bool),
+    By,
+    Calendar,
+    Colon,
     Comma,
+    Desc,
     Dot,
     Equal,
     Eof,
+    Flatten,
     From,
+    Greater,
+    GreaterEqual,
+    Group,
     Identifier(String),
+    LBrace,
+    LBracket,
+    Less,
+    LessEqual,
     Link(String),
     List,
     LParen,
+    Minus,
+    Not,
+    NotEqual,
+    Null,
+    Number(String),
     Or,
+    Plus,
+    RBrace,
+    RBracket,
     RParen,
+    Slash,
     String(String),
+    Sort,
+    Star,
+    Tag(String),
     Table,
+    Task,
+    Limit,
+    Without,
     Where,
+    Id,
 }
 
 impl NativeQuery {
@@ -833,6 +933,20 @@ impl NativeQuery {
     }
 }
 
+impl NativeSourceExpr {
+    fn parse(source: &str) -> Result<Self, DataviewError> {
+        if source.trim().is_empty() {
+            return Ok(Self::All);
+        }
+        let tokens = NativeLexer::new(source)
+            .tokenize()
+            .map_err(native_query_error)?;
+        NativeParser::new(tokens)
+            .parse_source_query()
+            .map_err(native_query_error)
+    }
+}
+
 impl NativeVault {
     fn read(bob_dir: &Path) -> Result<Self, DataviewError> {
         Ok(Self {
@@ -840,34 +954,96 @@ impl NativeVault {
         })
     }
 
-    fn evaluate(&self, query: &NativeQuery) -> NativeOutput {
-        let page_indices = self
-            .index
-            .pages
-            .iter()
-            .enumerate()
-            .filter(|(_, page)| query.matches_source_path(&page.path))
-            .filter(|(index, _)| query.matches_filter(self, *index))
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
+    fn evaluate_source(&self, source: &NativeSourceExpr) -> NativeOutput {
+        let paths = self
+            .evaluate_source_indices(source)
+            .into_iter()
+            .map(|index| self.index.pages[index].path.clone())
+            .collect();
+
+        NativeOutput {
+            paths,
+            result: NativeResult::Source,
+            warnings: self.index.warnings.clone(),
+        }
+    }
+
+    fn evaluate(
+        &self,
+        query: &NativeQuery,
+    ) -> Result<NativeOutput, DataviewError> {
+        query.ensure_executable()?;
+
+        let mut page_indices = self.index_order_indices();
+        for command in &query.commands {
+            match command {
+                NativeDataCommand::From(source) => {
+                    let source_indices = self.evaluate_source_indices(source);
+                    let current =
+                        page_indices.iter().copied().collect::<HashSet<_>>();
+                    page_indices = source_indices
+                        .into_iter()
+                        .filter(|index| current.contains(index))
+                        .collect();
+                }
+                NativeDataCommand::Where(expression) => {
+                    let filter =
+                        expression.filter.as_ref().ok_or_else(|| {
+                            native_unsupported_execution(format!(
+                            "native expression evaluation does not support \
+                             WHERE expression `{}` yet",
+                            expression.raw
+                        ))
+                        })?;
+                    page_indices.retain(|index| filter.evaluate(self, *index));
+                }
+                NativeDataCommand::Limit(limit) => {
+                    page_indices.truncate(*limit);
+                }
+                NativeDataCommand::Sort { expression, .. } => {
+                    return Err(native_unsupported_execution(format!(
+                        "native DQL execution does not support SORT \
+                         expression `{}` yet",
+                        expression.raw
+                    )));
+                }
+                NativeDataCommand::GroupBy { expression, .. } => {
+                    return Err(native_unsupported_execution(format!(
+                        "native DQL execution does not support GROUP BY \
+                         expression `{}` yet",
+                        expression.raw
+                    )));
+                }
+                NativeDataCommand::Flatten { expression, .. } => {
+                    return Err(native_unsupported_execution(format!(
+                        "native DQL execution does not support FLATTEN \
+                         expression `{}` yet",
+                        expression.raw
+                    )));
+                }
+            }
+        }
+
         let paths = page_indices
             .iter()
             .map(|index| self.index.pages[*index].path.clone())
             .collect::<Vec<_>>();
         let result = match &query.kind {
-            NativeQueryKind::List => NativeResult::List,
-            NativeQueryKind::Table { columns } => NativeResult::Table {
-                headers: columns
-                    .iter()
-                    .map(|column| column.join("."))
-                    .collect(),
+            NativeQueryKind::List { .. } => NativeResult::List,
+            NativeQueryKind::Table { columns, .. } => NativeResult::Table {
+                headers: columns.iter().map(NativeSelect::header).collect(),
                 values: page_indices
                     .iter()
                     .map(|page_index| {
                         columns
                             .iter()
                             .map(|column| {
-                                self.field_chain_value(*page_index, column)
+                                let chain = column
+                                    .expression
+                                    .field_chain
+                                    .as_ref()
+                                    .expect("ensure_executable checks columns");
+                                self.field_chain_value(*page_index, chain)
                                     .map(DataviewValue::to_plain_json)
                                     .unwrap_or(Value::Null)
                             })
@@ -875,13 +1051,149 @@ impl NativeVault {
                     })
                     .collect(),
             },
+            NativeQueryKind::Task { .. } | NativeQueryKind::Calendar { .. } => {
+                unreachable!(
+                    "ensure_executable rejects unsupported query kinds"
+                )
+            }
         };
 
-        NativeOutput {
+        Ok(NativeOutput {
             paths,
             result,
             warnings: self.index.warnings.clone(),
+        })
+    }
+
+    fn index_order_indices(&self) -> Vec<usize> {
+        (0..self.index.pages.len()).collect()
+    }
+
+    fn source_order_indices(&self) -> Vec<usize> {
+        let mut indices = self.index_order_indices();
+        indices.sort_by(|left, right| {
+            source_order_key(&self.index.pages[*left].path)
+                .cmp(&source_order_key(&self.index.pages[*right].path))
+        });
+        indices
+    }
+
+    fn evaluate_source_indices(&self, source: &NativeSourceExpr) -> Vec<usize> {
+        match source {
+            NativeSourceExpr::All => self.source_order_indices(),
+            NativeSourceExpr::And(left, right) => {
+                let right = self
+                    .evaluate_source_indices(right)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                self.evaluate_source_indices(left)
+                    .into_iter()
+                    .filter(|index| right.contains(index))
+                    .collect()
+            }
+            NativeSourceExpr::IncomingLink(raw) => {
+                self.incoming_link_source_indices(raw)
+            }
+            NativeSourceExpr::Not(expr) => {
+                let excluded = self
+                    .evaluate_source_indices(expr)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                self.source_order_indices()
+                    .into_iter()
+                    .filter(|index| !excluded.contains(index))
+                    .collect()
+            }
+            NativeSourceExpr::Or(left, right) => {
+                let mut indices = self.evaluate_source_indices(left);
+                let mut seen = indices.iter().copied().collect::<HashSet<_>>();
+                for index in self.evaluate_source_indices(right) {
+                    if seen.insert(index) {
+                        indices.push(index);
+                    }
+                }
+                indices
+            }
+            NativeSourceExpr::OutgoingLink(raw) => {
+                self.outgoing_link_source_indices(raw)
+            }
+            NativeSourceExpr::Path(raw) => self.path_source_indices(raw),
+            NativeSourceExpr::Tag(tag) => self.tag_source_indices(tag),
         }
+    }
+
+    fn tag_source_indices(&self, tag: &str) -> Vec<usize> {
+        let tag = normalize_source_tag(tag);
+        self.source_order_indices()
+            .into_iter()
+            .filter(|index| {
+                page_tags(&self.index.pages[*index])
+                    .iter()
+                    .any(|page_tag| tag_matches_source(page_tag, &tag))
+            })
+            .collect()
+    }
+
+    fn path_source_indices(&self, raw: &str) -> Vec<usize> {
+        if let Ok(path) = normalize_note_path(raw)
+            && let Some(index) = self.index.by_path.get(&path)
+        {
+            return vec![*index];
+        }
+
+        let Ok(folder) = normalize_native_source_folder(raw) else {
+            return Vec::new();
+        };
+        let prefix = format!("{folder}/");
+        self.source_order_indices()
+            .into_iter()
+            .filter(|index| self.index.pages[*index].path.starts_with(&prefix))
+            .collect()
+    }
+
+    fn incoming_link_source_indices(&self, raw: &str) -> Vec<usize> {
+        let Some(target) = self
+            .resolve_source_link(raw)
+            .map(|path| source_link_base(&path).to_string())
+        else {
+            return Vec::new();
+        };
+
+        self.source_order_indices()
+            .into_iter()
+            .filter(|index| {
+                page_outlink_paths(&self.index.pages[*index])
+                    .iter()
+                    .any(|path| source_link_base(path) == target)
+            })
+            .collect()
+    }
+
+    fn outgoing_link_source_indices(&self, raw: &str) -> Vec<usize> {
+        let Some(source) = self.resolve_source_link(raw) else {
+            return Vec::new();
+        };
+        let source = source_link_base(&source);
+        let Some(page_index) = self.index.by_path.get(source).copied() else {
+            return Vec::new();
+        };
+
+        let mut indices = Vec::new();
+        let mut seen = HashSet::new();
+        for path in page_outlink_paths(&self.index.pages[page_index]) {
+            let path = source_link_base(&path);
+            if let Some(index) = self.index.by_path.get(path).copied()
+                && seen.insert(index)
+            {
+                indices.push(index);
+            }
+        }
+        indices
+    }
+
+    fn resolve_source_link(&self, raw: &str) -> Option<String> {
+        let target = native_link_target(raw)?;
+        self.index.resolve_target_path(&target)
     }
 
     fn field_chain_value(
@@ -952,18 +1264,73 @@ impl NativeVault {
 }
 
 impl NativeQuery {
-    fn matches_source_path(&self, path: &str) -> bool {
-        let Some(source) = &self.source else {
-            return true;
-        };
-        let prefix = format!("{}/", source.folder);
-        path.starts_with(&prefix)
+    fn ensure_executable(&self) -> Result<(), DataviewError> {
+        match &self.kind {
+            NativeQueryKind::List {
+                expression: Some(expression),
+                ..
+            } => Err(native_unsupported_execution(format!(
+                "native DQL execution does not support LIST expression `{}` \
+                 yet",
+                expression.raw
+            ))),
+            NativeQueryKind::List {
+                expression: None, ..
+            } => Ok(()),
+            NativeQueryKind::Table { columns, .. } => {
+                for column in columns {
+                    if column.expression.field_chain.is_none() {
+                        return Err(native_unsupported_execution(format!(
+                            "native DQL execution does not support TABLE \
+                             expression `{}` yet",
+                            column.expression.raw
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            NativeQueryKind::Task { .. } => Err(native_unsupported_execution(
+                "native DQL execution does not support TASK queries yet"
+                    .to_string(),
+            )),
+            NativeQueryKind::Calendar { .. } => {
+                Err(native_unsupported_execution(
+                    "native DQL execution does not support CALENDAR queries \
+                     yet"
+                    .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+impl NativeSelect {
+    fn header(&self) -> String {
+        self.alias
+            .clone()
+            .unwrap_or_else(|| self.expression.raw.clone())
+    }
+}
+
+impl NativeExpression {
+    fn new(tokens: Vec<NativeToken>) -> Result<Self, String> {
+        if tokens.is_empty() {
+            return Err("expected expression".to_string());
+        }
+        let field_chain = field_chain_from_tokens(&tokens);
+        let raw = expression_tokens_to_string(&tokens);
+        Ok(Self {
+            raw,
+            field_chain,
+            filter: None,
+        })
     }
 
-    fn matches_filter(&self, vault: &NativeVault, page_index: usize) -> bool {
-        self.filter
-            .as_ref()
-            .is_none_or(|expr| expr.evaluate(vault, page_index))
+    fn where_clause(tokens: Vec<NativeToken>) -> Result<Self, String> {
+        let filter = supported_filter_from_tokens(&tokens)?;
+        let mut expression = Self::new(tokens)?;
+        expression.filter = filter;
+        Ok(expression)
     }
 }
 
@@ -1005,6 +1372,7 @@ impl NativeValue {
             Self::Link(expected) => {
                 vault.field_value_matches_link(actual, expected)
             }
+            Self::Null => matches!(actual, DataviewValue::Null),
             Self::String(expected) => {
                 actual.as_str() == Some(expected.as_str())
             }
@@ -1034,16 +1402,44 @@ impl<'a> NativeLexer<'a> {
                 ch if ch.is_whitespace() => {}
                 '(' => tokens.push(NativeToken::LParen),
                 ')' => tokens.push(NativeToken::RParen),
+                '[' if self.chars.peek() == Some(&'[') => {
+                    self.chars.next();
+                    tokens.push(NativeToken::Link(self.read_wikilink()?));
+                }
+                '[' => tokens.push(NativeToken::LBracket),
+                ']' => tokens.push(NativeToken::RBracket),
+                '{' => tokens.push(NativeToken::LBrace),
+                '}' => tokens.push(NativeToken::RBrace),
                 ',' => tokens.push(NativeToken::Comma),
+                ':' => tokens.push(NativeToken::Colon),
                 '.' => tokens.push(NativeToken::Dot),
+                '+' => tokens.push(NativeToken::Plus),
+                '-' => tokens.push(NativeToken::Minus),
+                '*' => tokens.push(NativeToken::Star),
+                '/' => tokens.push(NativeToken::Slash),
+                '!' if self.chars.peek() == Some(&'=') => {
+                    self.chars.next();
+                    tokens.push(NativeToken::NotEqual);
+                }
+                '!' => tokens.push(NativeToken::Not),
                 '=' => tokens.push(NativeToken::Equal),
+                '<' if self.chars.peek() == Some(&'=') => {
+                    self.chars.next();
+                    tokens.push(NativeToken::LessEqual);
+                }
+                '<' => tokens.push(NativeToken::Less),
+                '>' if self.chars.peek() == Some(&'=') => {
+                    self.chars.next();
+                    tokens.push(NativeToken::GreaterEqual);
+                }
+                '>' => tokens.push(NativeToken::Greater),
+                '#' => tokens.push(NativeToken::Tag(self.read_tag())),
                 '"' => tokens
                     .push(NativeToken::String(self.read_quoted_string('"')?)),
                 '\'' => tokens
                     .push(NativeToken::String(self.read_quoted_string('\'')?)),
-                '[' if self.chars.peek() == Some(&'[') => {
-                    self.chars.next();
-                    tokens.push(NativeToken::Link(self.read_wikilink()?));
+                ch if ch.is_ascii_digit() => {
+                    tokens.push(NativeToken::Number(self.read_number(ch)));
                 }
                 ch if is_native_identifier_start(ch) => {
                     let identifier = self.read_identifier(ch);
@@ -1100,6 +1496,33 @@ impl<'a> NativeLexer<'a> {
         Err("unterminated wikilink literal".into())
     }
 
+    fn read_tag(&mut self) -> String {
+        let mut output = String::from("#");
+        while self
+            .chars
+            .peek()
+            .is_some_and(|ch| is_native_tag_continue(*ch))
+        {
+            output
+                .push(self.chars.next().expect("peek confirmed tag character"));
+        }
+        output
+    }
+
+    fn read_number(&mut self, first: char) -> String {
+        let mut output = String::from(first);
+        while self
+            .chars
+            .peek()
+            .is_some_and(|ch| ch.is_ascii_digit() || *ch == '.')
+        {
+            output.push(
+                self.chars.next().expect("peek confirmed number character"),
+            );
+        }
+        output
+    }
+
     fn read_identifier(&mut self, first: char) -> String {
         let mut output = String::from(first);
         while self
@@ -1132,26 +1555,165 @@ impl NativeParser {
 
     fn parse_query(&mut self) -> Result<NativeQuery, String> {
         let kind = self.parse_query_kind()?;
-        let source = if self.take_from() {
-            Some(NativeSource {
-                folder: normalize_native_source_folder(
-                    &self.expect_string_source()?,
-                )?,
-            })
-        } else {
-            None
-        };
-        let filter = if self.take_where() {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
+        let mut commands = Vec::new();
+        while !self.at_eof() {
+            commands.push(self.parse_data_command()?);
+        }
         self.expect_eof()?;
-        Ok(NativeQuery {
-            kind,
-            source,
-            filter,
-        })
+        Ok(NativeQuery { kind, commands })
+    }
+
+    fn parse_source_query(&mut self) -> Result<NativeSourceExpr, String> {
+        let source = self.parse_source_expr()?;
+        self.expect_eof()?;
+        Ok(source)
+    }
+
+    fn parse_data_command(&mut self) -> Result<NativeDataCommand, String> {
+        match self.peek() {
+            NativeToken::From => {
+                self.position += 1;
+                Ok(NativeDataCommand::From(self.parse_source_expr()?))
+            }
+            NativeToken::Where => {
+                self.position += 1;
+                let tokens = self.collect_expression(ExpressionStop::Data)?;
+                Ok(NativeDataCommand::Where(NativeExpression::where_clause(
+                    tokens,
+                )?))
+            }
+            NativeToken::Sort => {
+                self.position += 1;
+                let mut tokens =
+                    self.collect_expression(ExpressionStop::Data)?;
+                let direction = match tokens.last() {
+                    Some(NativeToken::Asc) => {
+                        tokens.pop();
+                        Some(SortDirection::Ascending)
+                    }
+                    Some(NativeToken::Desc) => {
+                        tokens.pop();
+                        Some(SortDirection::Descending)
+                    }
+                    _ => None,
+                };
+                Ok(NativeDataCommand::Sort {
+                    expression: NativeExpression::new(tokens)?,
+                    _direction: direction,
+                })
+            }
+            NativeToken::Group => {
+                self.position += 1;
+                self.expect_by()?;
+                let expression = self.parse_aliased_command_expression()?;
+                Ok(NativeDataCommand::GroupBy {
+                    expression: expression.0,
+                    _alias: expression.1,
+                })
+            }
+            NativeToken::Flatten => {
+                self.position += 1;
+                let expression = self.parse_aliased_command_expression()?;
+                Ok(NativeDataCommand::Flatten {
+                    expression: expression.0,
+                    _alias: expression.1,
+                })
+            }
+            NativeToken::Limit => {
+                self.position += 1;
+                Ok(NativeDataCommand::Limit(self.expect_limit()?))
+            }
+            token => Err(format!(
+                "expected DQL data command, found {}; native parser supports \
+                 FROM, WHERE, SORT, GROUP BY, FLATTEN, and LIMIT",
+                native_token_name(token)
+            )),
+        }
+    }
+
+    fn parse_aliased_command_expression(
+        &mut self,
+    ) -> Result<(NativeExpression, Option<String>), String> {
+        let tokens = self.collect_expression(ExpressionStop::DataOrAs)?;
+        let expression = NativeExpression::new(tokens)?;
+        let alias = if self.take_as() {
+            Some(self.expect_alias()?)
+        } else {
+            None
+        };
+        Ok((expression, alias))
+    }
+
+    fn parse_source_expr(&mut self) -> Result<NativeSourceExpr, String> {
+        self.parse_source_or()
+    }
+
+    fn parse_source_or(&mut self) -> Result<NativeSourceExpr, String> {
+        let mut source = self.parse_source_and()?;
+        while self.take_or() {
+            let right = self.parse_source_and()?;
+            source = NativeSourceExpr::Or(Box::new(source), Box::new(right));
+        }
+        Ok(source)
+    }
+
+    fn parse_source_and(&mut self) -> Result<NativeSourceExpr, String> {
+        let mut source = self.parse_source_unary()?;
+        while self.take_and() {
+            let right = self.parse_source_unary()?;
+            source = NativeSourceExpr::And(Box::new(source), Box::new(right));
+        }
+        Ok(source)
+    }
+
+    fn parse_source_unary(&mut self) -> Result<NativeSourceExpr, String> {
+        if self.take_minus() {
+            return Ok(NativeSourceExpr::Not(Box::new(
+                self.parse_source_unary()?,
+            )));
+        }
+        self.parse_source_primary()
+    }
+
+    fn parse_source_primary(&mut self) -> Result<NativeSourceExpr, String> {
+        match self.peek() {
+            NativeToken::Tag(tag) => {
+                let tag = tag.clone();
+                self.position += 1;
+                Ok(NativeSourceExpr::Tag(tag))
+            }
+            NativeToken::String(path) => {
+                let path = path.clone();
+                self.position += 1;
+                Ok(NativeSourceExpr::Path(path))
+            }
+            NativeToken::Link(link) => {
+                let link = link.clone();
+                self.position += 1;
+                Ok(NativeSourceExpr::IncomingLink(link))
+            }
+            NativeToken::Identifier(identifier)
+                if identifier.eq_ignore_ascii_case("outgoing") =>
+            {
+                self.position += 1;
+                self.expect_lparen()?;
+                let link = self.expect_link()?;
+                self.expect_rparen()?;
+                Ok(NativeSourceExpr::OutgoingLink(link))
+            }
+            NativeToken::LParen => {
+                self.position += 1;
+                let source = self.parse_source_expr()?;
+                self.expect_rparen()?;
+                Ok(source)
+            }
+            token => Err(format!(
+                "expected Dataview source expression, found {}; native source \
+                 expressions support tags, quoted folders/files, wikilinks, \
+                 outgoing([[note]]), AND, OR, unary -, and parentheses",
+                native_token_name(token)
+            )),
+        }
     }
 
     fn parse_expr(&mut self) -> Result<NativeExpr, String> {
@@ -1226,6 +1788,10 @@ impl NativeParser {
                 self.position += 1;
                 Ok(NativeValue::Link(value))
             }
+            NativeToken::Null => {
+                self.position += 1;
+                Ok(NativeValue::Null)
+            }
             NativeToken::String(value) => {
                 let value = value.clone();
                 self.position += 1;
@@ -1243,29 +1809,114 @@ impl NativeParser {
         match self.peek() {
             NativeToken::List => {
                 self.position += 1;
-                Ok(NativeQueryKind::List)
+                let without_id = self.take_without_id()?;
+                let expression = if self.at_data_command() || self.at_eof() {
+                    None
+                } else {
+                    Some(NativeExpression::new(
+                        self.collect_expression(ExpressionStop::Data)?,
+                    )?)
+                };
+                Ok(NativeQueryKind::List {
+                    expression,
+                    _without_id: without_id,
+                })
             }
             NativeToken::Table => {
                 self.position += 1;
-                let mut columns = vec![self.parse_field_chain()?];
+                let without_id = self.take_without_id()?;
+                let mut columns = vec![self.parse_table_select()?];
                 while self.take_comma() {
-                    columns.push(self.parse_field_chain()?);
+                    columns.push(self.parse_table_select()?);
                 }
-                Ok(NativeQueryKind::Table { columns })
+                Ok(NativeQueryKind::Table {
+                    columns,
+                    _without_id: without_id,
+                })
+            }
+            NativeToken::Task => {
+                self.position += 1;
+                let without_id = self.take_without_id()?;
+                Ok(NativeQueryKind::Task {
+                    _without_id: without_id,
+                })
+            }
+            NativeToken::Calendar => {
+                self.position += 1;
+                let without_id = self.take_without_id()?;
+                let expression = NativeExpression::new(
+                    self.collect_expression(ExpressionStop::Data)?,
+                )?;
+                Ok(NativeQueryKind::Calendar {
+                    _expression: expression,
+                    _without_id: without_id,
+                })
             }
             token => Err(format!(
-                "native engine supports LIST and limited TABLE queries; found {}",
+                "native parser supports LIST, TABLE, TASK, and CALENDAR \
+                 queries; found {}",
                 native_token_name(token)
             )),
         }
     }
 
-    fn take_from(&mut self) -> bool {
-        self.take(|token| matches!(token, NativeToken::From))
+    fn parse_table_select(&mut self) -> Result<NativeSelect, String> {
+        let expression = NativeExpression::new(
+            self.collect_expression(ExpressionStop::TableSelect)?,
+        )?;
+        let alias = if self.take_as() {
+            Some(self.expect_alias()?)
+        } else {
+            None
+        };
+        Ok(NativeSelect { expression, alias })
     }
 
-    fn take_where(&mut self) -> bool {
-        self.take(|token| matches!(token, NativeToken::Where))
+    fn collect_expression(
+        &mut self,
+        stop: ExpressionStop,
+    ) -> Result<Vec<NativeToken>, String> {
+        let mut tokens = Vec::new();
+        let mut depth = 0usize;
+        loop {
+            let token = self.peek();
+            if matches!(token, NativeToken::Eof) {
+                break;
+            }
+            if depth == 0 && stop.stops_at(token) {
+                break;
+            }
+
+            match token {
+                NativeToken::LParen
+                | NativeToken::LBracket
+                | NativeToken::LBrace => {
+                    depth += 1;
+                }
+                NativeToken::RParen
+                | NativeToken::RBracket
+                | NativeToken::RBrace => {
+                    if depth == 0 {
+                        return Err(format!(
+                            "unexpected {} in DQL expression",
+                            native_token_name(token)
+                        ));
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            tokens.push(token.clone());
+            self.position += 1;
+        }
+
+        if depth != 0 {
+            return Err("unterminated grouping in DQL expression".to_string());
+        }
+        if tokens.is_empty() {
+            return Err("expected DQL expression".to_string());
+        }
+        Ok(tokens)
     }
 
     fn take_and(&mut self) -> bool {
@@ -1284,8 +1935,30 @@ impl NativeParser {
         self.take(|token| matches!(token, NativeToken::Comma))
     }
 
+    fn take_minus(&mut self) -> bool {
+        self.take(|token| matches!(token, NativeToken::Minus))
+    }
+
     fn take_equal(&mut self) -> bool {
         self.take(|token| matches!(token, NativeToken::Equal))
+    }
+
+    fn take_as(&mut self) -> bool {
+        self.take(|token| matches!(token, NativeToken::As))
+    }
+
+    fn take_without_id(&mut self) -> Result<bool, String> {
+        if !self.take(|token| matches!(token, NativeToken::Without)) {
+            return Ok(false);
+        }
+        if self.take(|token| matches!(token, NativeToken::Id)) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "expected ID after WITHOUT, found {}",
+                native_token_name(self.peek())
+            ))
+        }
     }
 
     fn take(&mut self, predicate: impl FnOnce(&NativeToken) -> bool) -> bool {
@@ -1294,6 +1967,25 @@ impl NativeParser {
             true
         } else {
             false
+        }
+    }
+
+    fn expect_alias(&mut self) -> Result<String, String> {
+        match self.peek() {
+            NativeToken::Identifier(alias) => {
+                let alias = alias.clone();
+                self.position += 1;
+                Ok(alias)
+            }
+            NativeToken::String(alias) => {
+                let alias = alias.clone();
+                self.position += 1;
+                Ok(alias)
+            }
+            token => Err(format!(
+                "expected alias after AS, found {}",
+                native_token_name(token)
+            )),
         }
     }
 
@@ -1309,17 +2001,52 @@ impl NativeParser {
         Ok(identifier)
     }
 
-    fn expect_string_source(&mut self) -> Result<String, String> {
-        let NativeToken::String(source) = self.peek() else {
+    fn expect_link(&mut self) -> Result<String, String> {
+        let NativeToken::Link(link) = self.peek() else {
             return Err(format!(
-                "native engine supports quoted folder sources only, such as \
-                 FROM \"ref\"; found {}",
+                "expected wikilink, found {}",
                 native_token_name(self.peek())
             ));
         };
-        let source = source.clone();
+        let link = link.clone();
         self.position += 1;
-        Ok(source)
+        Ok(link)
+    }
+
+    fn expect_limit(&mut self) -> Result<usize, String> {
+        let NativeToken::Number(limit) = self.peek() else {
+            return Err(format!(
+                "expected LIMIT count, found {}",
+                native_token_name(self.peek())
+            ));
+        };
+        let limit = limit.parse::<usize>().map_err(|_| {
+            format!("LIMIT count must be a non-negative integer: {limit}")
+        })?;
+        self.position += 1;
+        Ok(limit)
+    }
+
+    fn expect_by(&mut self) -> Result<(), String> {
+        if matches!(self.peek(), NativeToken::By) {
+            self.position += 1;
+            return Ok(());
+        }
+        Err(format!(
+            "expected BY after GROUP, found {}",
+            native_token_name(self.peek())
+        ))
+    }
+
+    fn expect_lparen(&mut self) -> Result<(), String> {
+        if matches!(self.peek(), NativeToken::LParen) {
+            self.position += 1;
+            return Ok(());
+        }
+        Err(format!(
+            "expected '(', found {}",
+            native_token_name(self.peek())
+        ))
     }
 
     fn expect_rparen(&mut self) -> Result<(), String> {
@@ -1349,10 +2076,302 @@ impl NativeParser {
             .get(self.position)
             .unwrap_or_else(|| self.tokens.last().expect("lexer adds EOF"))
     }
+
+    fn at_eof(&self) -> bool {
+        matches!(self.peek(), NativeToken::Eof)
+    }
+
+    fn at_data_command(&self) -> bool {
+        is_data_command(self.peek())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExpressionStop {
+    Data,
+    DataOrAs,
+    TableSelect,
+}
+
+impl ExpressionStop {
+    fn stops_at(self, token: &NativeToken) -> bool {
+        match self {
+            Self::Data => is_data_command(token),
+            Self::DataOrAs => {
+                is_data_command(token) || matches!(token, NativeToken::As)
+            }
+            Self::TableSelect => {
+                is_data_command(token)
+                    || matches!(token, NativeToken::Comma | NativeToken::As)
+            }
+        }
+    }
 }
 
 fn native_query_error(message: String) -> DataviewError {
     DataviewError::NativeQuery { message }
+}
+
+fn native_unsupported_execution(message: String) -> DataviewError {
+    DataviewError::NativeQuery { message }
+}
+
+fn supported_filter_from_tokens(
+    tokens: &[NativeToken],
+) -> Result<Option<NativeExpr>, String> {
+    if tokens.iter().any(is_unsupported_filter_token)
+        || has_field_to_field_comparison(tokens)
+    {
+        return Ok(None);
+    }
+
+    let mut filter_tokens = tokens.to_vec();
+    filter_tokens.push(NativeToken::Eof);
+    let mut parser = NativeParser::new(filter_tokens);
+    let expr = parser.parse_expr()?;
+    parser.expect_eof()?;
+    Ok(Some(expr))
+}
+
+fn is_unsupported_filter_token(token: &NativeToken) -> bool {
+    !matches!(
+        token,
+        NativeToken::And
+            | NativeToken::Bool(_)
+            | NativeToken::Dot
+            | NativeToken::Equal
+            | NativeToken::Identifier(_)
+            | NativeToken::Link(_)
+            | NativeToken::LParen
+            | NativeToken::Null
+            | NativeToken::Or
+            | NativeToken::RParen
+            | NativeToken::String(_)
+    )
+}
+
+fn has_field_to_field_comparison(tokens: &[NativeToken]) -> bool {
+    tokens.windows(2).any(|window| {
+        matches!(
+            window,
+            [NativeToken::Equal, NativeToken::Identifier(_)]
+                | [NativeToken::Equal, NativeToken::LParen]
+        )
+    })
+}
+
+fn field_chain_from_tokens(tokens: &[NativeToken]) -> Option<Vec<String>> {
+    let mut tokens = tokens.iter();
+    let NativeToken::Identifier(first) = tokens.next()? else {
+        return None;
+    };
+    let mut chain = vec![first.clone()];
+    loop {
+        match tokens.next() {
+            None => return Some(chain),
+            Some(NativeToken::Dot) => {
+                let Some(NativeToken::Identifier(field)) = tokens.next() else {
+                    return None;
+                };
+                chain.push(field.clone());
+            }
+            Some(_) => return None,
+        }
+    }
+}
+
+fn expression_tokens_to_string(tokens: &[NativeToken]) -> String {
+    if let Some(chain) = field_chain_from_tokens(tokens) {
+        return chain.join(".");
+    }
+
+    let mut output = String::new();
+    let mut previous_word = false;
+    for token in tokens {
+        let piece = token_expression_piece(token);
+        let current_word = token_is_wordlike(token);
+        if !output.is_empty()
+            && should_space_expression_piece(
+                &output,
+                previous_word,
+                current_word,
+                token,
+            )
+        {
+            output.push(' ');
+        }
+        output.push_str(&piece);
+        previous_word = current_word;
+    }
+    output
+}
+
+fn token_expression_piece(token: &NativeToken) -> String {
+    match token {
+        NativeToken::And => "AND".to_string(),
+        NativeToken::As => "AS".to_string(),
+        NativeToken::Asc => "ASC".to_string(),
+        NativeToken::Bool(value) => value.to_string(),
+        NativeToken::By => "BY".to_string(),
+        NativeToken::Calendar => "CALENDAR".to_string(),
+        NativeToken::Colon => ":".to_string(),
+        NativeToken::Comma => ",".to_string(),
+        NativeToken::Desc => "DESC".to_string(),
+        NativeToken::Dot => ".".to_string(),
+        NativeToken::Equal => "=".to_string(),
+        NativeToken::Eof => String::new(),
+        NativeToken::Flatten => "FLATTEN".to_string(),
+        NativeToken::From => "FROM".to_string(),
+        NativeToken::Greater => ">".to_string(),
+        NativeToken::GreaterEqual => ">=".to_string(),
+        NativeToken::Group => "GROUP".to_string(),
+        NativeToken::Identifier(value) => value.clone(),
+        NativeToken::LBrace => "{".to_string(),
+        NativeToken::LBracket => "[".to_string(),
+        NativeToken::Less => "<".to_string(),
+        NativeToken::LessEqual => "<=".to_string(),
+        NativeToken::Link(value) => format!("[[{value}]]"),
+        NativeToken::List => "LIST".to_string(),
+        NativeToken::LParen => "(".to_string(),
+        NativeToken::Minus => "-".to_string(),
+        NativeToken::Not => "!".to_string(),
+        NativeToken::NotEqual => "!=".to_string(),
+        NativeToken::Null => "null".to_string(),
+        NativeToken::Number(value) => value.clone(),
+        NativeToken::Or => "OR".to_string(),
+        NativeToken::Plus => "+".to_string(),
+        NativeToken::RBrace => "}".to_string(),
+        NativeToken::RBracket => "]".to_string(),
+        NativeToken::RParen => ")".to_string(),
+        NativeToken::Slash => "/".to_string(),
+        NativeToken::String(value) => format!("{value:?}"),
+        NativeToken::Sort => "SORT".to_string(),
+        NativeToken::Star => "*".to_string(),
+        NativeToken::Tag(value) => value.clone(),
+        NativeToken::Table => "TABLE".to_string(),
+        NativeToken::Task => "TASK".to_string(),
+        NativeToken::Limit => "LIMIT".to_string(),
+        NativeToken::Without => "WITHOUT".to_string(),
+        NativeToken::Where => "WHERE".to_string(),
+        NativeToken::Id => "ID".to_string(),
+    }
+}
+
+fn token_is_wordlike(token: &NativeToken) -> bool {
+    matches!(
+        token,
+        NativeToken::And
+            | NativeToken::As
+            | NativeToken::Asc
+            | NativeToken::Bool(_)
+            | NativeToken::By
+            | NativeToken::Calendar
+            | NativeToken::Desc
+            | NativeToken::Flatten
+            | NativeToken::From
+            | NativeToken::Group
+            | NativeToken::Identifier(_)
+            | NativeToken::Link(_)
+            | NativeToken::List
+            | NativeToken::Null
+            | NativeToken::Number(_)
+            | NativeToken::Or
+            | NativeToken::Sort
+            | NativeToken::String(_)
+            | NativeToken::Tag(_)
+            | NativeToken::Table
+            | NativeToken::Task
+            | NativeToken::Limit
+            | NativeToken::Without
+            | NativeToken::Where
+            | NativeToken::Id
+    )
+}
+
+fn should_space_expression_piece(
+    output: &str,
+    previous_word: bool,
+    current_word: bool,
+    token: &NativeToken,
+) -> bool {
+    if matches!(
+        token,
+        NativeToken::Comma
+            | NativeToken::Dot
+            | NativeToken::RParen
+            | NativeToken::RBracket
+            | NativeToken::RBrace
+    ) {
+        return false;
+    }
+    if output.ends_with(['(', '[', '{', '.', '-', '!', '/']) {
+        return false;
+    }
+    previous_word || current_word
+}
+
+fn is_data_command(token: &NativeToken) -> bool {
+    matches!(
+        token,
+        NativeToken::From
+            | NativeToken::Where
+            | NativeToken::Sort
+            | NativeToken::Group
+            | NativeToken::Flatten
+            | NativeToken::Limit
+    )
+}
+
+fn source_order_key(path: &str) -> (String, String) {
+    let name = note_stem(path).unwrap_or_else(|| path.to_string());
+    (name.to_ascii_lowercase(), path.to_ascii_lowercase())
+}
+
+fn normalize_source_tag(tag: &str) -> String {
+    let tag = tag.trim();
+    if tag.starts_with('#') {
+        tag.to_string()
+    } else {
+        format!("#{tag}")
+    }
+}
+
+fn tag_matches_source(page_tag: &str, source_tag: &str) -> bool {
+    page_tag == source_tag
+        || page_tag
+            .strip_prefix(source_tag)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn page_tags(page: &index::DataviewPage) -> Vec<String> {
+    page.source_tags.clone()
+}
+
+fn page_outlink_paths(page: &index::DataviewPage) -> Vec<String> {
+    page_file_array(page, "outlinks")
+        .into_iter()
+        .filter_map(|value| match value {
+            DataviewValue::Link(link) => Some(link.path),
+            _ => None,
+        })
+        .collect()
+}
+
+fn page_file_array(
+    page: &index::DataviewPage,
+    field: &str,
+) -> Vec<DataviewValue> {
+    let Some(DataviewValue::Object(file)) = page.fields.get("file") else {
+        return Vec::new();
+    };
+    let Some(DataviewValue::Array(values)) = file.get(field) else {
+        return Vec::new();
+    };
+    values.clone()
+}
+
+fn source_link_base(path: &str) -> &str {
+    path.split_once('#').map_or(path, |(base, _)| base)
 }
 
 fn collect_native_markdown_paths(
@@ -1523,16 +2542,34 @@ fn is_native_identifier_continue(ch: char) -> bool {
     ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()
 }
 
+fn is_native_tag_continue(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | ',' | '"' | '\'')
+}
+
 fn native_identifier_token(identifier: String) -> NativeToken {
     match identifier.to_ascii_lowercase().as_str() {
         "and" => NativeToken::And,
+        "as" => NativeToken::As,
+        "asc" | "ascending" => NativeToken::Asc,
+        "by" => NativeToken::By,
+        "calendar" => NativeToken::Calendar,
+        "desc" | "descending" => NativeToken::Desc,
+        "flatten" => NativeToken::Flatten,
         "false" => NativeToken::Bool(false),
         "from" => NativeToken::From,
+        "group" => NativeToken::Group,
+        "id" => NativeToken::Id,
+        "limit" => NativeToken::Limit,
         "list" => NativeToken::List,
+        "null" => NativeToken::Null,
         "or" => NativeToken::Or,
+        "sort" => NativeToken::Sort,
         "table" => NativeToken::Table,
+        "task" => NativeToken::Task,
         "true" => NativeToken::Bool(true),
         "where" => NativeToken::Where,
+        "without" => NativeToken::Without,
         _ => NativeToken::Identifier(identifier),
     }
 }
@@ -1540,21 +2577,51 @@ fn native_identifier_token(identifier: String) -> NativeToken {
 fn native_token_name(token: &NativeToken) -> &'static str {
     match token {
         NativeToken::And => "AND",
+        NativeToken::As => "AS",
+        NativeToken::Asc => "ASC",
         NativeToken::Bool(_) => "boolean",
+        NativeToken::By => "BY",
+        NativeToken::Calendar => "CALENDAR",
+        NativeToken::Colon => "':'",
         NativeToken::Comma => "','",
+        NativeToken::Desc => "DESC",
         NativeToken::Dot => "'.'",
         NativeToken::Equal => "'='",
         NativeToken::Eof => "end of query",
+        NativeToken::Flatten => "FLATTEN",
         NativeToken::From => "FROM",
+        NativeToken::Greater => "'>'",
+        NativeToken::GreaterEqual => "'>='",
+        NativeToken::Group => "GROUP",
         NativeToken::Identifier(_) => "field name",
+        NativeToken::LBrace => "'{'",
+        NativeToken::LBracket => "'['",
+        NativeToken::Less => "'<'",
+        NativeToken::LessEqual => "'<='",
         NativeToken::Link(_) => "wikilink",
         NativeToken::List => "LIST",
         NativeToken::LParen => "'('",
+        NativeToken::Minus => "'-'",
+        NativeToken::Not => "'!'",
+        NativeToken::NotEqual => "'!='",
+        NativeToken::Null => "null",
+        NativeToken::Number(_) => "number",
         NativeToken::Or => "OR",
+        NativeToken::Plus => "'+'",
+        NativeToken::RBrace => "'}'",
+        NativeToken::RBracket => "']'",
         NativeToken::RParen => "')'",
+        NativeToken::Slash => "'/'",
         NativeToken::String(_) => "string",
+        NativeToken::Sort => "SORT",
+        NativeToken::Star => "'*'",
+        NativeToken::Tag(_) => "tag",
         NativeToken::Table => "TABLE",
+        NativeToken::Task => "TASK",
+        NativeToken::Limit => "LIMIT",
+        NativeToken::Without => "WITHOUT",
         NativeToken::Where => "WHERE",
+        NativeToken::Id => "ID",
     }
 }
 
@@ -2336,8 +3403,8 @@ Obsidian vault.\n\n\
 Source expressions return matching page paths. DQL queries support path, JSON, \
 and markdown output modes. The default Obsidian engine is the exact Dataview \
 runtime. The explicit dynomark engine is a partial headless fallback for DQL \
-paths and JSON output. The native engine is a headless local frontmatter \
-subset for LIST and limited TABLE queries.",
+paths and JSON output. The native engine is a headless local source-expression \
+and frontmatter DQL subset.",
         )
         .after_help(
             "Examples:\n  bob dataview --source '#project and -\"archive\"'\n  bob dataview --query 'LIST FROM #waiting'\n  bob dataview --format json --query-file ~/queries/projects.dql",
@@ -2374,7 +3441,7 @@ fn engine_arg() -> Arg {
         .value_name("ENGINE")
         .default_value("obsidian")
         .value_parser(["dynomark", "native", "obsidian"])
-        .help("Query engine: obsidian for exact Dataview, dynomark for partial headless DQL, native for local frontmatter DQL")
+        .help("Query engine: obsidian for exact Dataview, dynomark for partial headless DQL, native for local headless Dataview")
 }
 
 fn format_arg() -> Arg {
@@ -2461,14 +3528,6 @@ impl Request {
             return Err(command.error(
                 ErrorKind::ArgumentConflict,
                 "--engine dynomark supports DQL queries only; use --query or \
-                 --query-file",
-            ));
-        }
-
-        if engine == Engine::Native && query.is_source() {
-            return Err(command.error(
-                ErrorKind::ArgumentConflict,
-                "--engine native supports DQL queries only; use --query or \
                  --query-file",
             ));
         }
@@ -2711,6 +3770,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_source_parser_accepts_phase3_source_surface() {
+        assert!(matches!(
+            NativeSourceExpr::parse("").expect("empty source parses"),
+            NativeSourceExpr::All
+        ));
+
+        let source =
+            NativeSourceExpr::parse(r#"(#project or "Daily") and -"Archive""#)
+                .expect("source algebra parses");
+        assert!(matches!(source, NativeSourceExpr::And(_, _)));
+
+        let outgoing = NativeSourceExpr::parse("outgoing([[Links/Hub]])")
+            .expect("outgoing source parses");
+        assert!(matches!(outgoing, NativeSourceExpr::OutgoingLink(_)));
+    }
+
+    #[test]
+    fn native_dql_parser_accepts_phase3_command_surface() {
+        let query = NativeQuery::parse(
+            r#"
+TABLE WITHOUT ID owner AS Owner, choice(ready, "yes", "no") AS Readiness
+FROM (#project OR "Daily") AND -"Archive"
+WHERE ready AND owner = [[People/Ada Lovelace]]
+SORT due DESC
+GROUP BY status AS Status
+FLATTEN aliases AS alias
+LIMIT 5
+"#,
+        )
+        .expect("phase 3 DQL surface parses");
+
+        match query.kind {
+            NativeQueryKind::Table {
+                columns,
+                _without_id,
+            } => {
+                assert!(_without_id);
+                assert_eq!(columns.len(), 2);
+                assert_eq!(columns[0].header(), "Owner");
+                assert_eq!(columns[1].header(), "Readiness");
+            }
+            other => panic!("expected table query, got {other:?}"),
+        }
+        assert_eq!(query.commands.len(), 6);
+        assert!(matches!(query.commands[0], NativeDataCommand::From(_)));
+        assert!(matches!(query.commands[1], NativeDataCommand::Where(_)));
+        assert!(matches!(query.commands[2], NativeDataCommand::Sort { .. }));
+        assert!(matches!(
+            query.commands[3],
+            NativeDataCommand::GroupBy { .. }
+        ));
+        assert!(matches!(
+            query.commands[4],
+            NativeDataCommand::Flatten { .. }
+        ));
+        assert!(matches!(query.commands[5], NativeDataCommand::Limit(5)));
+    }
+
+    #[test]
+    fn native_dql_parser_reports_representative_invalid_queries() {
+        let table = native_error_message(
+            NativeQuery::parse("TABLE FROM #project")
+                .expect_err("missing table expression should fail"),
+        );
+        assert!(table.contains("expected DQL expression"), "{table}");
+
+        let source = native_error_message(
+            NativeQuery::parse("LIST FROM (#project or")
+                .expect_err("unfinished source should fail"),
+        );
+        assert!(
+            source.contains("expected Dataview source expression"),
+            "{source}"
+        );
+
+        let outgoing = native_error_message(
+            NativeSourceExpr::parse(r#"outgoing("Projects")"#)
+                .expect_err("outgoing source requires wikilink"),
+        );
+        assert!(outgoing.contains("expected wikilink"), "{outgoing}");
+    }
+
+    #[test]
     fn source_paths_are_normalized_and_deduplicated() {
         let paths = vec![
             "Projects\\Alpha".to_string(),
@@ -2853,5 +3995,12 @@ mod tests {
                 && extraction.warnings[1].contains("DQL table row 3"),
             "{extraction:?}"
         );
+    }
+
+    fn native_error_message(error: DataviewError) -> String {
+        match error {
+            DataviewError::NativeQuery { message } => message,
+            other => panic!("expected native query error, got {other:?}"),
+        }
     }
 }

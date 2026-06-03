@@ -1167,10 +1167,6 @@ fn dataview_headless_engines_reject_unsupported_combinations() {
             "--engine dynomark supports DQL queries only",
         ),
         (
-            &["dataview", "--engine", "native", "--source", "#project"],
-            "--engine native supports DQL queries only",
-        ),
-        (
             &[
                 "dataview",
                 "--engine",

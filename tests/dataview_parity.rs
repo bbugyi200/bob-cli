@@ -352,44 +352,103 @@ fn dataview_native_index_skips_hidden_directories() {
 }
 
 #[test]
+fn dataview_native_source_expressions_match_fixture_goldens() {
+    let cases = [
+        (
+            "tag",
+            &["--source", "#project"][..],
+            "Projects/Alpha.md\nProjects/Beta.md\nProjects/Gamma.md\nArchive/Old.md\n",
+        ),
+        (
+            "folder",
+            &["--source", r#""Projects""#],
+            "Projects/Alpha.md\nProjects/Beta.md\nProjects/Gamma.md\n",
+        ),
+        (
+            "file",
+            &["--source", r#""Projects/Alpha.md""#],
+            "Projects/Alpha.md\n",
+        ),
+        (
+            "incoming link",
+            &["--source", "[[Links/Target]]"],
+            "Projects/Beta.md\nLinks/Hub.md\n",
+        ),
+        (
+            "outgoing link",
+            &["--source", "outgoing([[Links/Hub]])"],
+            "Projects/Alpha.md\nProjects/Beta.md\nLinks/Target.md\n",
+        ),
+        (
+            "source algebra",
+            &["--source", r#"(#project or "Daily") and -"Archive""#],
+            "Projects/Alpha.md\nProjects/Beta.md\nProjects/Gamma.md\nDaily/2026-06-03.md\n",
+        ),
+    ];
+
+    for (name, args, expected_stdout) in cases {
+        let output = run_native_fixture(args);
+        assert_success(&output);
+        assert_eq!(
+            stdout(&output),
+            expected_stdout,
+            "native source expression changed for {name}:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).is_empty(),
+            "native source expression should keep stderr clean for {name}:\n{}",
+            format_output(&output)
+        );
+    }
+
+    let json =
+        run_native_fixture(&["--format", "json", "--source", "#project"]);
+    assert_success(&json);
+    assert_json_stdout_eq(
+        &json,
+        json!({
+            "engine": "native",
+            "query_kind": "source",
+            "format": "json",
+            "paths": [
+                "Projects/Alpha.md",
+                "Projects/Beta.md",
+                "Projects/Gamma.md",
+                "Archive/Old.md"
+            ],
+            "warnings": []
+        }),
+    );
+}
+
+#[test]
+fn dataview_native_dql_from_accepts_source_expressions() {
+    let output = run_native_fixture(&[
+        "--strict-paths",
+        "--query",
+        r#"LIST FROM (#project or "Daily") AND -"Archive""#,
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/Alpha.md\nProjects/Beta.md\nProjects/Gamma.md\nDaily/2026-06-03.md\n",
+        "native DQL FROM source expression changed:\n{}",
+        format_output(&output)
+    );
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
+}
+
+#[test]
 fn dataview_native_expected_failures_record_future_parity_contract() {
     let cases = [
-        NativeFailureCase {
-            name: "source tag",
-            args: &["--source", "#project"],
-            markers: &["--engine native supports DQL queries only"],
-        },
-        NativeFailureCase {
-            name: "source folder",
-            args: &["--source", r#""Projects""#],
-            markers: &["--engine native supports DQL queries only"],
-        },
-        NativeFailureCase {
-            name: "source file",
-            args: &["--source", r#""Projects/Alpha.md""#],
-            markers: &["--engine native supports DQL queries only"],
-        },
-        NativeFailureCase {
-            name: "source incoming link",
-            args: &["--source", "[[Links/Target]]"],
-            markers: &["--engine native supports DQL queries only"],
-        },
-        NativeFailureCase {
-            name: "source algebra",
-            args: &["--source", r#"(#project or "Daily") and -"Archive""#],
-            markers: &["--engine native supports DQL queries only"],
-        },
-        NativeFailureCase {
-            name: "tag source in DQL",
-            args: &["--format", "json", "--query", "LIST FROM #project"],
-            markers: &["native query failed", "unsupported token '#'"],
-        },
         NativeFailureCase {
             name: "task JSON",
             args: &["--format", "json", "--query", r#"TASK FROM "Tasks""#],
             markers: &[
                 "native query failed",
-                "native engine supports LIST and limited TABLE queries",
+                "native DQL execution does not support TASK queries yet",
             ],
         },
         NativeFailureCase {
@@ -402,13 +461,16 @@ fn dataview_native_expected_failures_record_future_parity_contract() {
             ],
             markers: &[
                 "native query failed",
-                "native engine supports LIST and limited TABLE queries",
+                "native DQL execution does not support CALENDAR queries yet",
             ],
         },
         NativeFailureCase {
             name: "grouped paths",
             args: &["--query", r#"LIST FROM "Projects" GROUP BY status"#],
-            markers: &["native query failed", "unexpected field name"],
+            markers: &[
+                "native query failed",
+                "native DQL execution does not support GROUP BY expression `status` yet",
+            ],
         },
         NativeFailureCase {
             name: "flattened paths",
@@ -416,7 +478,10 @@ fn dataview_native_expected_failures_record_future_parity_contract() {
                 "--query",
                 r#"TABLE aliases FROM "Projects" FLATTEN aliases"#,
             ],
-            markers: &["native query failed", "unexpected field name"],
+            markers: &[
+                "native query failed",
+                "native DQL execution does not support FLATTEN expression `aliases` yet",
+            ],
         },
         NativeFailureCase {
             name: "list markdown",
@@ -461,7 +526,10 @@ fn dataview_native_expected_failures_record_future_parity_contract() {
                 "--query",
                 r#"LIST FROM "Projects" WHERE owner = this.owner"#,
             ],
-            markers: &["native query failed", "expected comparison value"],
+            markers: &[
+                "native query failed",
+                "native expression evaluation does not support WHERE expression `owner = this.owner` yet",
+            ],
         },
     ];
 

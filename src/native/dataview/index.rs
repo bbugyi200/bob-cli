@@ -28,6 +28,7 @@ pub(super) struct DataviewIndex {
 pub(super) struct DataviewPage {
     pub(super) path: String,
     pub(super) fields: HashMap<String, DataviewValue>,
+    pub(super) source_tags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -41,6 +42,7 @@ struct PageDraft {
     aliases: Vec<String>,
     explicit_tags: Vec<String>,
     tags: Vec<String>,
+    source_tags: Vec<String>,
     outlinks: Vec<DataviewLink>,
     tasks: Vec<DataviewValue>,
     lists: Vec<DataviewValue>,
@@ -193,14 +195,24 @@ impl PageDraft {
         parse_page_inline_fields(body, &mut fields);
 
         let aliases = extract_aliases(fields.get("aliases"));
+        let frontmatter_tags = explicit_file_tags(fields.get("tags"))
+            .into_iter()
+            .chain(explicit_file_tags(fields.get("tag")))
+            .collect::<Vec<_>>();
         let explicit_tags = dedup_strings(
-            explicit_file_tags(fields.get("tags"))
-                .into_iter()
-                .chain(explicit_file_tags(fields.get("tag")))
+            frontmatter_tags
+                .iter()
+                .cloned()
                 .chain(markdown_tags(body))
                 .collect(),
         );
         let tags = expand_file_tags(&explicit_tags);
+        let source_tags = expand_file_tags(&dedup_strings(
+            frontmatter_tags
+                .into_iter()
+                .chain(markdown_page_tags(body))
+                .collect(),
+        ));
         let outlinks = dedup_links(markdown_links(&contents));
         let (tasks, lists) =
             markdown_lists(&relative_path, body, body_start_line, &fields);
@@ -215,6 +227,7 @@ impl PageDraft {
             aliases,
             explicit_tags,
             tags,
+            source_tags,
             outlinks,
             tasks,
             lists,
@@ -256,6 +269,7 @@ impl PageDraft {
         DataviewPage {
             path: self.path,
             fields: self.fields,
+            source_tags: self.source_tags,
         }
     }
 
@@ -763,6 +777,14 @@ fn markdown_tags(contents: &str) -> Vec<String> {
         .expect("valid tag regex");
     tag.captures_iter(contents)
         .map(|captures| normalize_tag(&captures[2]))
+        .collect()
+}
+
+fn markdown_page_tags(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter(|line| markdown_list_line(line).is_none())
+        .flat_map(markdown_tags)
         .collect()
 }
 
