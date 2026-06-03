@@ -457,60 +457,327 @@ fn dataview_rejects_invalid_argument_combinations() {
 }
 
 #[test]
-fn dataview_valid_query_reports_temporary_engine_stub() {
-    let temp = TempDir::new("bob-cli-dataview-stub");
+fn dataview_obsidian_source_uses_path_command_and_sentinel_protocol() {
+    let temp = TempDir::new("bob-cli-dataview-source");
     let stub_bin = temp.path().join("bin");
-    let vault = temp.path().join("vault");
     let log = temp.path().join("commands.log");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
-    fs::create_dir_all(&vault).expect("create vault");
-    write_executable(
-        &stub_bin.join("ob"),
-        "#!/bin/sh\nprintf 'ob %s\\n' \"$*\" >> \"$STUB_LOG\"\nexit 99\n",
-    );
-    write_executable(
+
+    write_obsidian_success_stub(
         &stub_bin.join("obsidian"),
-        "#!/bin/sh\nprintf 'obsidian %s\\n' \"$*\" >> \"$STUB_LOG\"\nexit 99\n",
+        r##"{"status":"ok","kind":"source_paths","paths":["Projects/alpha.md","Inbox/waiting.md"],"warnings":["cold start"]}"##,
     );
 
     let output = bob_command()
         .arg("dataview")
-        .arg("--query")
-        .arg("LIST FROM #project")
-        .arg("--sync")
-        .env("BOB_DATAVIEW_VAULT", "Bob")
-        .env("BOB_DIR", &vault)
+        .arg("--source")
+        .arg("#project")
+        .arg("--vault")
+        .arg("Bob")
+        .env_remove("BOB_DATAVIEW_OBSIDIAN_COMMAND")
+        .env_remove("BOB_DATAVIEW_VAULT")
         .env("PATH", path_with_prefix(&stub_bin))
         .env("STUB_LOG", &log)
         .output()
-        .expect("run bob dataview query");
+        .expect("run bob dataview source query");
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/alpha.md\nInbox/waiting.md\n",
+        "source paths should be printed cleanly:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("warning: cold start"),
+        "protocol warnings should go to stderr:\n{}",
+        format_output(&output)
+    );
+
+    let log_text = fs::read_to_string(&log).expect("read obsidian argv log");
+    assert_text_order(&log_text, &["ARG:vault=Bob", "ARG:eval", "ARG:code="]);
+    assert!(
+        log_text.contains(r##""query":{"kind":"source","source":"#project"}"##)
+            && log_text.contains("api.pagePaths")
+            && log_text.contains("BOB_DATAVIEW_RESULT"),
+        "expected generated source-query JavaScript in obsidian argv:\n{log_text}"
+    );
+}
+
+#[test]
+fn dataview_obsidian_dql_json_reads_query_file_and_forwards_env_vault() {
+    let temp = TempDir::new("bob-cli-dataview-dql-json");
+    let obsidian = temp.path().join("obsidian");
+    let query_file = temp.path().join("projects.dql");
+    let log = temp.path().join("commands.log");
+    write_file(&query_file, "LIST FROM #project");
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"dql_json","result":{"type":"list","values":[{"path":"Projects/alpha.md"}]},"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--format")
+        .arg("json")
+        .arg("--origin")
+        .arg("Home.md")
+        .arg("--query-file")
+        .arg(&query_file)
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env("BOB_DATAVIEW_VAULT", "Bob")
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run bob dataview dql json query");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected dataview stderr:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["engine"], "obsidian");
+    assert_eq!(json["query_kind"], "dql");
+    assert_eq!(json["format"], "json");
+    assert_eq!(json["result"]["type"], "list");
+    assert_eq!(json["result"]["values"][0]["path"], "Projects/alpha.md");
+
+    let log_text = fs::read_to_string(&log).expect("read obsidian argv log");
+    assert_text_order(&log_text, &["ARG:vault=Bob", "ARG:eval", "ARG:code="]);
+    assert!(
+        log_text.contains(r##""origin":"Home.md""##)
+            && log_text.contains(
+                r##""query":{"kind":"dql","query":"LIST FROM #project"}"##
+            )
+            && log_text.contains(
+                "api.tryQuery(request.query.query, origin, { forceId: true })"
+            ),
+        "expected generated DQL JavaScript in obsidian argv:\n{log_text}"
+    );
+}
+
+#[test]
+fn dataview_obsidian_markdown_prints_rendered_markdown() {
+    let temp = TempDir::new("bob-cli-dataview-markdown");
+    let obsidian = temp.path().join("obsidian");
+    let log = temp.path().join("commands.log");
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"markdown","markdown":"| File |\n| --- |\n| Alpha |\n","warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--format")
+        .arg("markdown")
+        .arg("--query")
+        .arg("TABLE file.name FROM #project")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run bob dataview markdown query");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "| File |\n| --- |\n| Alpha |\n");
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected dataview stderr:\n{}",
+        format_output(&output)
+    );
+    let log_text = fs::read_to_string(&log).expect("read obsidian argv log");
+    assert!(
+        !log_text.contains("ARG:vault=")
+            && log_text.contains("api.tryQueryMarkdown"),
+        "markdown query should not forward an unset vault:\n{log_text}"
+    );
+}
+
+#[test]
+fn dataview_obsidian_reports_protocol_errors() {
+    let cases = [
+        (
+            "missing-dataview",
+            r##"{"status":"error","code":"DATAVIEW_MISSING","message":"Dataview plugin not loaded"}"##,
+            "Dataview is disabled, missing, or not ready",
+            "Dataview plugin not loaded",
+        ),
+        (
+            "query-error",
+            r##"{"status":"error","code":"DATAVIEW_QUERY_ERROR","message":"Expected one of FROM, WHERE"}"##,
+            "Dataview query failed",
+            "Expected one of FROM, WHERE",
+        ),
+    ];
+
+    for (name, payload, marker, detail) in cases {
+        let temp = TempDir::new(&format!("bob-cli-dataview-{name}"));
+        let obsidian = temp.path().join("obsidian");
+        let log = temp.path().join("commands.log");
+        write_obsidian_success_stub(&obsidian, payload);
+
+        let output = bob_command()
+            .arg("dataview")
+            .arg("--format")
+            .arg("json")
+            .arg("--query")
+            .arg("LIST FROM #project")
+            .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+            .env_remove("BOB_DATAVIEW_VAULT")
+            .env("STUB_LOG", &log)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run bob dataview protocol error {name}: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "protocol error should fail:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stdout(&output).is_empty(),
+            "protocol errors must keep stdout clean:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains(marker)
+                && stderr(&output).contains(detail),
+            "expected protocol error report for {name}:\n{}",
+            format_output(&output)
+        );
+    }
+}
+
+#[test]
+fn dataview_obsidian_reports_missing_and_malformed_sentinel() {
+    let cases = [
+        (
+            "missing-sentinel",
+            "#!/bin/sh\nprintf 'plugin log only\\n'\n",
+            "missing Obsidian protocol response",
+            "plugin log only",
+        ),
+        (
+            "malformed-sentinel",
+            "#!/bin/sh\nprintf 'BOB_DATAVIEW_RESULT\\t{not-json}\\n'\n",
+            "malformed Obsidian protocol response",
+            "invalid sentinel JSON",
+        ),
+    ];
+
+    for (name, script, marker, detail) in cases {
+        let temp = TempDir::new(&format!("bob-cli-dataview-{name}"));
+        let obsidian = temp.path().join("obsidian");
+        write_executable(&obsidian, script);
+
+        let output = bob_command()
+            .arg("dataview")
+            .arg("--format")
+            .arg("json")
+            .arg("--query")
+            .arg("LIST FROM #project")
+            .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+            .env_remove("BOB_DATAVIEW_VAULT")
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run bob dataview sentinel case {name}: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "sentinel protocol failure should exit 1:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stdout(&output).is_empty(),
+            "sentinel protocol failures must keep stdout clean:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains(marker)
+                && stderr(&output).contains(detail),
+            "expected sentinel protocol error for {name}:\n{}",
+            format_output(&output)
+        );
+    }
+}
+
+#[test]
+fn dataview_obsidian_reports_missing_command_without_query_blob() {
+    let temp = TempDir::new("bob-cli-dataview-missing-command");
+    let missing = temp.path().join("missing-obsidian");
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--format")
+        .arg("json")
+        .arg("--query")
+        .arg("LIST FROM #project WHERE status = \"active\"")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &missing)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .output()
+        .expect("run bob dataview with missing obsidian");
 
     assert_eq!(
         output.status.code(),
         Some(1),
-        "temporary dataview stub should fail:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        stdout(&output).is_empty(),
-        "temporary dataview stub must keep stdout clean:\n{}",
+        "missing obsidian command should fail:\n{}",
         format_output(&output)
     );
     let err = stderr(&output);
     assert!(
-        err.contains("engine execution is not implemented yet")
-            && err.contains("engine: obsidian")
-            && err.contains("query: inline DQL")
-            && err.contains("format: paths")
-            && err.contains("vault: Bob")
-            && err.contains("sync: true"),
-        "expected temporary dataview execution report:\n{}",
+        stdout(&output).is_empty()
+            && err.contains("Obsidian command not found")
+            && err.contains("BOB_DATAVIEW_OBSIDIAN_COMMAND")
+            && !err.contains("LIST FROM #project")
+            && !err.contains("code="),
+        "missing-command error should be actionable without query/code leak:\n{}",
         format_output(&output)
     );
+}
+
+#[test]
+fn dataview_obsidian_reports_not_running_without_javascript_blob() {
+    let temp = TempDir::new("bob-cli-dataview-not-running");
+    let obsidian = temp.path().join("obsidian");
+    write_executable(
+        &obsidian,
+        "#!/bin/sh\nprintf 'The CLI is unable to find Obsidian. Please make sure Obsidian is running and try again. %s\\n' \"$*\" >&2\nexit 1\n",
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--format")
+        .arg("json")
+        .arg("--query")
+        .arg("LIST FROM #project WHERE status = \"active\"")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .output()
+        .expect("run bob dataview when Obsidian is not running");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "not-running obsidian should fail:\n{}",
+        format_output(&output)
+    );
+    let err = stderr(&output);
     assert!(
-        !log.exists(),
-        "phase 1 dataview stub must not run external commands:\n{}",
-        fs::read_to_string(&log).unwrap_or_default()
+        stdout(&output).is_empty()
+            && err.contains("Obsidian is not running")
+            && err.contains("<generated JavaScript>")
+            && !err.contains("LIST FROM #project")
+            && !err.contains("forceId"),
+        "not-running error should redact generated JavaScript:\n{}",
+        format_output(&output)
     );
 }
 
@@ -3682,6 +3949,26 @@ fn write_executable(path: &Path, contents: &str) {
         panic!("write executable stub {}: {error}", path.display())
     });
     set_mode(path, 0o755);
+}
+
+fn write_obsidian_success_stub(path: &Path, payload: &str) {
+    let sentinel_line =
+        shell_single_quote(&format!("BOB_DATAVIEW_RESULT\t{payload}"));
+    write_executable(
+        path,
+        &format!(
+            "#!/bin/sh\n\
+             : > \"$STUB_LOG\"\n\
+             for arg in \"$@\"; do printf 'ARG:%s\\n' \"$arg\" >> \"$STUB_LOG\"; done\n\
+             printf 'plugin log before\\n'\n\
+             printf '%s\\n' {sentinel_line}\n\
+             printf 'plugin log after\\n'\n"
+        ),
+    );
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(unix)]
