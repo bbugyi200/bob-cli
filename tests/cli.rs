@@ -400,7 +400,6 @@ fn dataview_help_lists_options_alphabetically() {
             "\n      --query-file ",
             "\n      --source ",
             "\n      --strict-paths",
-            "\n      --sync",
             "\n      --vault ",
         ],
     );
@@ -882,8 +881,8 @@ fn dataview_obsidian_reports_not_running_without_javascript_blob() {
 }
 
 #[test]
-fn dataview_sync_runs_ob_with_bob_dir_and_keeps_stdout_clean() {
-    let temp = TempDir::new("bob-cli-dataview-sync");
+fn dataview_obsidian_query_does_not_run_ob_command() {
+    let temp = TempDir::new("bob-cli-dataview-no-sync");
     let vault = temp.path().join("vault");
     let ob = temp.path().join("ob");
     let obsidian = temp.path().join("obsidian");
@@ -894,18 +893,8 @@ fn dataview_sync_runs_ob_with_bob_dir_and_keeps_stdout_clean() {
         &ob,
         r#"#!/bin/sh
 printf 'ob %s\n' "$*" >> "$OB_LOG"
-case "$1" in
-  sync)
-    printf 'sync stdout\n'
-    printf 'sync stderr\n' >&2
-    exit 0
-    ;;
-  sync-status)
-    printf 'status stdout\n'
-    exit 0
-    ;;
-esac
-exit 64
+printf 'ob should not run\n' >&2
+exit 99
 "#,
     );
     write_obsidian_success_stub(
@@ -919,130 +908,74 @@ exit 64
         .arg(&vault)
         .arg("--source")
         .arg("#project")
-        .arg("--sync")
         .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
         .env_remove("BOB_DATAVIEW_VAULT")
         .env("OB_COMMAND", &ob)
         .env("OB_LOG", &ob_log)
         .env("STUB_LOG", &obsidian_log)
         .output()
-        .expect("run synced bob dataview query");
+        .expect("run bob dataview query with failing ob stub");
 
     assert_success(&output);
     assert_eq!(
         stdout(&output),
         "Projects/alpha.md\n",
-        "sync logs must not pollute paths stdout:\n{}",
-        format_output(&output)
-    );
-    let err = stderr(&output);
-    assert!(
-        err.contains("sync stdout")
-            && err.contains("sync stderr")
-            && err.contains("status stdout"),
-        "sync and sync-status output should be visible on stderr:\n{}",
-        format_output(&output)
-    );
-
-    let ob_log = fs::read_to_string(&ob_log).expect("read ob log");
-    let sync_call = format!("ob sync --path {}", path_str(&vault));
-    let status_call = format!("ob sync-status --path {}", path_str(&vault));
-    assert_text_order(&ob_log, &[&sync_call, &status_call]);
-}
-
-#[test]
-fn dataview_sync_missing_ob_warns_and_continues() {
-    let temp = TempDir::new("bob-cli-dataview-sync-missing-ob");
-    let vault = temp.path().join("vault");
-    let obsidian = temp.path().join("obsidian");
-    let obsidian_log = temp.path().join("obsidian.log");
-    fs::create_dir_all(&vault).expect("create vault");
-    write_obsidian_success_stub(
-        &obsidian,
-        r##"{"status":"ok","kind":"source_paths","paths":["Inbox/waiting.md"],"warnings":[]}"##,
-    );
-
-    let output = bob_command()
-        .arg("dataview")
-        .arg("--bob-dir")
-        .arg(&vault)
-        .arg("--source")
-        .arg("#waiting")
-        .arg("--sync")
-        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
-        .env_remove("BOB_DATAVIEW_VAULT")
-        .env("OB_COMMAND", temp.path().join("missing-ob"))
-        .env("STUB_LOG", &obsidian_log)
-        .output()
-        .expect("run synced bob dataview query with missing ob");
-
-    assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        "Inbox/waiting.md\n",
-        "missing ob warning must not pollute stdout:\n{}",
+        "paths output should stay clean without sync logs:\n{}",
         format_output(&output)
     );
     assert!(
-        stderr(&output).contains("warning: ob command not found"),
-        "missing ob should warn and continue:\n{}",
+        stderr(&output).is_empty(),
+        "dataview should not surface ob output:\n{}",
         format_output(&output)
+    );
+    assert!(
+        !ob_log.exists(),
+        "bob dataview must not run OB_COMMAND:\n{}",
+        fs::read_to_string(&ob_log).unwrap_or_default()
     );
 }
 
 #[test]
-fn dataview_sync_failure_aborts_before_obsidian_query() {
-    let temp = TempDir::new("bob-cli-dataview-sync-failure");
-    let vault = temp.path().join("vault");
+fn dataview_rejects_removed_sync_option() {
+    let temp = TempDir::new("bob-cli-dataview-sync-rejected");
     let ob = temp.path().join("ob");
-    let obsidian = temp.path().join("obsidian");
-    let obsidian_log = temp.path().join("obsidian.log");
-    fs::create_dir_all(&vault).expect("create vault");
+    let ob_log = temp.path().join("ob.log");
     write_executable(
         &ob,
-        "#!/bin/sh\nprintf 'sync exploded\\n' >&2\nexit 42\n",
-    );
-    write_obsidian_success_stub(
-        &obsidian,
-        r##"{"status":"ok","kind":"source_paths","paths":["Projects/alpha.md"],"warnings":[]}"##,
+        "#!/bin/sh\nprintf 'ob %s\\n' \"$*\" >> \"$OB_LOG\"\nexit 99\n",
     );
 
     let output = bob_command()
         .arg("dataview")
-        .arg("--bob-dir")
-        .arg(&vault)
-        .arg("--format")
-        .arg("json")
+        .arg("--sync")
         .arg("--source")
         .arg("#project")
-        .arg("--sync")
-        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
-        .env_remove("BOB_DATAVIEW_VAULT")
         .env("OB_COMMAND", &ob)
-        .env("STUB_LOG", &obsidian_log)
+        .env("OB_LOG", &ob_log)
         .output()
-        .expect("run synced bob dataview query with sync failure");
+        .expect("run bob dataview with removed sync flag");
 
     assert_eq!(
         output.status.code(),
-        Some(42),
-        "sync failure should return the ob exit code:\n{}",
+        Some(2),
+        "removed --sync flag should be a usage failure:\n{}",
         format_output(&output)
     );
     assert!(
         stdout(&output).is_empty(),
-        "sync failure must keep stdout clean:\n{}",
+        "usage failure must keep stdout clean:\n{}",
+        format_output(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("unexpected argument") && err.contains("--sync"),
+        "removed --sync flag should fail visibly:\n{}",
         format_output(&output)
     );
     assert!(
-        stderr(&output).contains("sync exploded")
-            && stderr(&output).contains("ob sync failed"),
-        "sync failure should be reported clearly:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        !obsidian_log.exists(),
-        "Obsidian must not be queried after sync failure"
+        !ob_log.exists(),
+        "usage rejection must not run OB_COMMAND:\n{}",
+        fs::read_to_string(&ob_log).unwrap_or_default()
     );
 }
 

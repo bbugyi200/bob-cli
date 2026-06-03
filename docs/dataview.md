@@ -47,8 +47,8 @@ printf 'LIST FROM #waiting\n' | bob dataview --query-file -
 ## Options
 
 `--bob-dir <PATH>` sets the Bob vault root. It defaults to `BOB_DIR` or `~/bob`.
-The path is validated when it is supplied explicitly, when `--sync` is used, or
-when the `dynomark` engine is used.
+The path is validated when it is supplied explicitly or when the `dynomark`
+engine is used.
 
 `--engine <obsidian|dynomark>` selects the query engine. The default is
 `obsidian`; `dynomark` is an explicit partial-compatibility headless fallback.
@@ -71,14 +71,13 @@ from stdin.
 cleanly from every DQL row. Without it, best-effort path extraction warnings go
 to stderr and the command prints the paths it can derive.
 
-`--sync` runs `ob sync --path <bob-dir>` and `ob sync-status --path <bob-dir>`
-before querying. Sync logs go to stderr. Missing `ob` and already-running syncs
-warn and continue; a real sync failure aborts before querying.
-
 `--vault <NAME_OR_ID>` forwards an Obsidian vault name or ID to the Obsidian CLI.
 If omitted, `BOB_DATAVIEW_VAULT` is used when set.
 
 Exactly one of `--source`, `--query`, and `--query-file` is required.
+
+`bob dataview` does not run `ob sync` or `ob sync-status`. Vault freshness is
+owned by the external background or cron sync path.
 
 ## JSON Output
 
@@ -106,12 +105,8 @@ printf 'LIST FROM #project\n' >/tmp/bob-dataview-smoke.dql
 bob dataview --query-file /tmp/bob-dataview-smoke.dql
 ```
 
-To include vault freshness, install and configure `ob`, then run:
-
-```bash
-bob dataview --sync --format paths --source '#waiting'
-bob dataview --sync --format json --query 'LIST FROM #waiting'
-```
+If the smoke test needs recently synced state, let the external background or
+cron sync path finish first. `bob dataview` only reads the current vault state.
 
 ## Headless dynomark
 

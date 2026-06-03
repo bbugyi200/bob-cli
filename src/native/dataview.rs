@@ -19,7 +19,7 @@ use clap::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{env as bob_env, ob};
+use super::env as bob_env;
 
 const COMMAND_NAME: &str = "bob dataview";
 const ENV_DYNOMARK_COMMAND: &str = "BOB_DATAVIEW_DYNOMARK_COMMAND";
@@ -200,7 +200,6 @@ struct Request {
     engine: Engine,
     vault: VaultConfig,
     strict_paths: bool,
-    sync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,10 +277,6 @@ fn run_request(request: &Request) -> Result<(), DataviewError> {
 fn run_obsidian(request: &Request) -> Result<(), DataviewError> {
     let eval_request = request.obsidian_eval_request()?;
 
-    if request.sync {
-        sync_before_query(&request.vault.bob_dir)?;
-    }
-
     let javascript = build_obsidian_javascript(&eval_request)?;
     let output = run_obsidian_eval(&request.vault, &javascript)?;
     let engine_output = parse_protocol_stdout(&output.stdout)?;
@@ -296,10 +291,6 @@ fn run_dynomark(request: &Request) -> Result<(), DataviewError> {
         ),
     };
 
-    if request.sync {
-        sync_before_query(&request.vault.bob_dir)?;
-    }
-
     let output = run_dynomark_query(&request.vault.bob_dir, &query)?;
     if !output.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
@@ -308,28 +299,6 @@ fn run_dynomark(request: &Request) -> Result<(), DataviewError> {
     let dynomark_output =
         parse_dynomark_stdout(&output.stdout, &request.vault.bob_dir);
     emit_dynomark_output(request, dynomark_output)
-}
-
-fn sync_before_query(bob_dir: &Path) -> Result<(), DataviewError> {
-    let child_env = ob::child_env();
-    match ob::sync_vault_to_stderr(bob_dir, &child_env) {
-        Ok(ob::SyncOutcome::Ran) => Ok(()),
-        Ok(ob::SyncOutcome::SkippedMissingCommand) => {
-            eprintln!(
-                "{COMMAND_NAME}: warning: ob command not found; continuing \
-                 without sync"
-            );
-            Ok(())
-        }
-        Ok(ob::SyncOutcome::AlreadyRunning) => {
-            eprintln!(
-                "{COMMAND_NAME}: warning: another ob sync is already running; \
-                 continuing without a fresh sync"
-            );
-            Ok(())
-        }
-        Err(exit_code) => Err(DataviewError::SyncFailed { exit_code }),
-    }
 }
 
 fn run_obsidian_eval(
@@ -1281,9 +1250,6 @@ enum DataviewError {
     StrictPaths {
         warnings: Vec<String>,
     },
-    SyncFailed {
-        exit_code: i32,
-    },
 }
 
 impl DataviewError {
@@ -1418,12 +1384,6 @@ impl DataviewError {
                      omit --strict-paths for best-effort path output."
                 );
             }
-            Self::SyncFailed { exit_code } => {
-                eprintln!(
-                    "{COMMAND_NAME}: ob sync failed with exit code \
-                     {exit_code}; aborting before Dataview query"
-                );
-            }
         }
     }
 
@@ -1431,8 +1391,7 @@ impl DataviewError {
         match self {
             Self::DynomarkFailed { exit_code, .. }
             | Self::ObsidianFailed { exit_code, .. }
-            | Self::ObsidianNotRunning { exit_code, .. }
-            | Self::SyncFailed { exit_code } => *exit_code,
+            | Self::ObsidianNotRunning { exit_code, .. } => *exit_code,
             _ => 1,
         }
     }
@@ -1498,7 +1457,6 @@ paths and JSON output.",
         .arg(query_file_arg())
         .arg(source_arg())
         .arg(strict_paths_arg())
-        .arg(sync_arg())
         .arg(vault_arg())
 }
 
@@ -1567,13 +1525,6 @@ fn strict_paths_arg() -> Arg {
         .help("Fail when paths output cannot derive clean note paths")
 }
 
-fn sync_arg() -> Arg {
-    Arg::new("sync")
-        .long("sync")
-        .action(ArgAction::SetTrue)
-        .help("Run ob sync before querying, keeping sync logs off stdout")
-}
-
 fn vault_arg() -> Arg {
     Arg::new("vault")
         .long("vault")
@@ -1591,7 +1542,6 @@ impl Request {
         let format = OutputFormat::from_matches(matches);
         let engine = Engine::from_matches(matches);
         let strict_paths = matches.get_flag("strict-paths");
-        let sync = matches.get_flag("sync");
 
         if query.is_source() && format == OutputFormat::Markdown {
             return Err(command.error(
@@ -1630,10 +1580,9 @@ impl Request {
             vault: VaultConfig::from_matches(
                 matches,
                 command,
-                sync || engine == Engine::Dynomark,
+                engine == Engine::Dynomark,
             )?,
             strict_paths,
-            sync,
         })
     }
 
@@ -1752,14 +1701,14 @@ impl VaultConfig {
     fn from_matches(
         matches: &ArgMatches,
         command: &mut ClapCommand,
-        sync: bool,
+        validate_default_bob_dir: bool,
     ) -> Result<Self, clap::Error> {
         let bob_dir_arg = matches.get_one::<OsString>("bob-dir");
         let bob_dir = bob_dir_arg
             .map(PathBuf::from)
             .map(|path| bob_env::expand_tilde(&path))
             .unwrap_or_else(bob_env::bob_dir);
-        if bob_dir_arg.is_some() || sync {
+        if bob_dir_arg.is_some() || validate_default_bob_dir {
             validate_bob_dir(&bob_dir, command)?;
         }
 

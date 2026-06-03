@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 15:04:53
-status: wip
+status: done
 prompt: sdd/prompts/202606/dataview_no_sync.md
 ---
 # Plan: Make `bob dataview` Read-Only and Sync-Free

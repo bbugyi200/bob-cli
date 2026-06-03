@@ -75,10 +75,10 @@ Runs Dataview source expressions and DQL queries from the shell. The default
 engine evaluates queries inside a running desktop Obsidian app with the target
 vault open and the Dataview plugin enabled. `paths` output prints one
 vault-relative Markdown path per line, `json` output is stable for scripts, and
-`markdown` output prints Dataview-rendered Markdown. `--sync` can run `ob sync`
-before querying while keeping stdout reserved for query results. An explicit
-`--engine dynomark` mode is available for partial-compatibility headless DQL
-paths and JSON output.
+`markdown` output prints Dataview-rendered Markdown. This command does not run
+`ob sync`; vault freshness is handled by the external background or cron sync
+path. An explicit `--engine dynomark` mode is available for
+partial-compatibility headless DQL paths and JSON output.
 
 The full command contract and live smoke-test steps live in
 [`docs/dataview.md`](docs/dataview.md).
@@ -208,7 +208,6 @@ useful for validating or forcing the embedded script fallback with
 The remaining runtime dependencies are:
 
 - `ob` from obsidian-headless for the shared `bob cronjob` Obsidian sync gate
-  and for `bob dataview --sync`
 - `obsidian` CLI plus a running desktop Obsidian vault with the Dataview plugin
   for the default `bob dataview` engine
 - `git` and `ssh` for `bob bulk-git-commit` and for `bob move-done-tasks`
