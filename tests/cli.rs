@@ -505,6 +505,105 @@ fn dataview_obsidian_source_uses_path_command_and_sentinel_protocol() {
 }
 
 #[test]
+fn dataview_obsidian_dql_paths_extracts_and_deduplicates_note_paths() {
+    let temp = TempDir::new("bob-cli-dataview-dql-paths");
+    let obsidian = temp.path().join("obsidian");
+    let log = temp.path().join("commands.log");
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"dql_json","result":{"type":"table","idMeaning":{"type":"path"},"headers":["File","Status"],"values":[[{"type":"link","path":"Projects/alpha.md","display":null,"embed":false},"active"],[{"type":"link","path":"Projects/alpha.md","display":null,"embed":false},"duplicate"],[{"path":"Inbox\\waiting"},"waiting"]]},"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--query")
+        .arg("TABLE status FROM #project")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run bob dataview dql paths query");
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/alpha.md\nInbox/waiting.md\n",
+        "DQL paths should be printed cleanly:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected dataview stderr:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn dataview_obsidian_dql_paths_warn_or_fail_for_missing_identities() {
+    let temp = TempDir::new("bob-cli-dataview-dql-strict-paths");
+    let obsidian = temp.path().join("obsidian");
+    let log = temp.path().join("commands.log");
+    write_obsidian_success_stub(
+        &obsidian,
+        r##"{"status":"ok","kind":"dql_json","result":{"type":"table","idMeaning":{"type":"path"},"headers":["File","Status"],"values":[[],[{"path":"Projects/alpha.md"},"active"]]},"warnings":[]}"##,
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--query")
+        .arg("TABLE status FROM #project")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run non-strict bob dataview dql paths query");
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/alpha.md\n",
+        "non-strict DQL paths should print best-effort paths:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("warning: DQL table row 1"),
+        "non-strict DQL paths should warn about missing identities:\n{}",
+        format_output(&output)
+    );
+
+    let output = bob_command()
+        .arg("dataview")
+        .arg("--query")
+        .arg("TABLE status FROM #project")
+        .arg("--strict-paths")
+        .env("BOB_DATAVIEW_OBSIDIAN_COMMAND", &obsidian)
+        .env_remove("BOB_DATAVIEW_VAULT")
+        .env("STUB_LOG", &log)
+        .output()
+        .expect("run strict bob dataview dql paths query");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "strict DQL paths should fail:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output).is_empty(),
+        "strict DQL paths must keep stdout clean:\n{}",
+        format_output(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("paths output could not derive clean note paths")
+            && err.contains("DQL table row 1")
+            && err.contains("--format json"),
+        "strict DQL paths should explain how to inspect raw results:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
 fn dataview_obsidian_dql_json_reads_query_file_and_forwards_env_vault() {
     let temp = TempDir::new("bob-cli-dataview-dql-json");
     let obsidian = temp.path().join("obsidian");
@@ -543,6 +642,7 @@ fn dataview_obsidian_dql_json_reads_query_file_and_forwards_env_vault() {
     assert_eq!(json["engine"], "obsidian");
     assert_eq!(json["query_kind"], "dql");
     assert_eq!(json["format"], "json");
+    assert_eq!(json["paths"][0], "Projects/alpha.md");
     assert_eq!(json["result"]["type"], "list");
     assert_eq!(json["result"]["values"][0]["path"], "Projects/alpha.md");
 
