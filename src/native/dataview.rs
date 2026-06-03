@@ -12,13 +12,16 @@ use std::{
     time::Duration,
 };
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use clap::{
     builder::{NonEmptyStringValueParser, OsStringValueParser},
     error::ErrorKind,
     Arg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand,
 };
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
+use sha2::{Digest, Sha256};
 
 use self::{
     index::DataviewIndex,
@@ -1572,15 +1575,748 @@ fn evaluate_call(
     context: &EvalContext<'_>,
 ) -> DataviewValue {
     match function.to_ascii_lowercase().as_str() {
+        "object" => evaluate_object_call(args, context),
+        "list" | "array" => DataviewValue::Array(evaluated_args(args, context)),
+        "date" => evaluate_unary_vector_call(args, context, date_value),
+        "dur" => evaluate_unary_vector_call(args, context, duration_value),
+        "number" => evaluate_unary_vector_call(args, context, number_value),
+        "string" => evaluate_unary_vector_call(args, context, string_value),
+        "link" => evaluate_link_call(args, context, false),
+        "elink" => evaluate_external_link_call(args, context),
+        "embed" => evaluate_embed_call(args, context),
+        "typeof" => evaluate_unary_scalar_call(args, context, typeof_value),
+        "round" => evaluate_round_call(args, context),
+        "trunc" => evaluate_numeric_round_call(args, context, f64::trunc),
+        "floor" => evaluate_numeric_round_call(args, context, f64::floor),
+        "ceil" => evaluate_numeric_round_call(args, context, f64::ceil),
+        "min" => evaluate_extreme_call(args, context, Ordering::Less),
+        "max" => evaluate_extreme_call(args, context, Ordering::Greater),
+        "sum" => evaluate_numeric_aggregate_call(
+            args,
+            context,
+            NumericAggregate::Sum,
+        ),
+        "product" => evaluate_numeric_aggregate_call(
+            args,
+            context,
+            NumericAggregate::Product,
+        ),
+        "reduce" => evaluate_reduce_call(args, context),
+        "average" => evaluate_numeric_aggregate_call(
+            args,
+            context,
+            NumericAggregate::Average,
+        ),
+        "contains" => {
+            evaluate_contains_call(args, context, ContainsMode::Contains)
+        }
+        "icontains" => {
+            evaluate_contains_call(args, context, ContainsMode::Insensitive)
+        }
+        "econtains" => {
+            evaluate_contains_call(args, context, ContainsMode::Exact)
+        }
+        "containsword" => evaluate_containsword_call(args, context),
+        "extract" => evaluate_extract_call(args, context),
+        "sort" => evaluate_sort_call(args, context),
+        "reverse" => evaluate_reverse_call(args, context),
+        "length" => evaluate_unary_scalar_call(args, context, length_value),
+        "nonnull" => evaluate_nonnull_call(args, context),
+        "firstvalue" => evaluate_firstvalue_call(args, context),
         "filter" => evaluate_filter_call(args, context),
         "map" => evaluate_map_call(args, context),
         "any" => evaluate_quantifier_call(args, context, Quantifier::Any),
         "all" => evaluate_quantifier_call(args, context, Quantifier::All),
         "none" => evaluate_quantifier_call(args, context, Quantifier::None),
+        "join" => evaluate_join_call(args, context),
+        "unique" => evaluate_unique_call(args, context),
+        "flat" => evaluate_flat_call(args, context),
+        "slice" => evaluate_slice_call(args, context),
+        "regextest" => evaluate_regex_test_call(args, context, false),
+        "regexmatch" => evaluate_regex_test_call(args, context, true),
+        "regexreplace" => evaluate_regex_replace_call(args, context),
+        "replace" => evaluate_replace_call(args, context),
+        "lower" => evaluate_unary_vector_call(args, context, |value| {
+            string_map(value, str::to_lowercase)
+        }),
+        "upper" => evaluate_unary_vector_call(args, context, |value| {
+            string_map(value, str::to_uppercase)
+        }),
+        "split" => evaluate_split_call(args, context),
+        "startswith" => {
+            evaluate_string_predicate_call(args, context, |text, prefix| {
+                text.starts_with(prefix)
+            })
+        }
+        "endswith" => {
+            evaluate_string_predicate_call(args, context, |text, suffix| {
+                text.ends_with(suffix)
+            })
+        }
+        "padleft" => evaluate_pad_call(args, context, PadSide::Left),
+        "padright" => evaluate_pad_call(args, context, PadSide::Right),
+        "substring" => evaluate_substring_call(args, context),
+        "truncate" => evaluate_truncate_call(args, context),
+        "default" => evaluate_default_call(args, context, true),
+        "ldefault" => evaluate_default_call(args, context, false),
+        "display" => evaluate_unary_vector_call(args, context, display_value),
+        "choice" => evaluate_choice_call(args, context),
+        "hash" => evaluate_hash_call(args, context),
+        "striptime" => {
+            evaluate_unary_vector_call(args, context, striptime_value)
+        }
+        "dateformat" => evaluate_dateformat_call(args, context),
+        "durationformat" => evaluate_durationformat_call(args, context),
+        "currencyformat" => evaluate_currencyformat_call(args, context),
+        "localtime" => {
+            evaluate_unary_vector_call(args, context, localtime_value)
+        }
+        "meta" => evaluate_unary_vector_call(args, context, meta_value),
         "minby" => evaluate_extreme_by_call(args, context, Ordering::Less),
         "maxby" => evaluate_extreme_by_call(args, context, Ordering::Greater),
         _ => DataviewValue::Null,
     }
+}
+
+fn evaluated_args(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> Vec<DataviewValue> {
+    args.iter().map(|arg| arg.evaluate(context)).collect()
+}
+
+fn evaluate_unary_scalar_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    function: impl FnOnce(DataviewValue) -> DataviewValue,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    function(arg.evaluate(context))
+}
+
+fn evaluate_unary_vector_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    function: impl Fn(DataviewValue) -> DataviewValue,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    vectorize_unary(arg.evaluate(context), function)
+}
+
+fn vectorize_unary(
+    value: DataviewValue,
+    function: impl Fn(DataviewValue) -> DataviewValue,
+) -> DataviewValue {
+    match value {
+        DataviewValue::Array(values) => {
+            DataviewValue::Array(values.into_iter().map(function).collect())
+        }
+        value => function(value),
+    }
+}
+
+fn vectorize_binary(
+    left: DataviewValue,
+    right: DataviewValue,
+    function: impl Fn(DataviewValue, DataviewValue) -> DataviewValue + Copy,
+) -> DataviewValue {
+    match (left, right) {
+        (DataviewValue::Array(left), DataviewValue::Array(right)) => {
+            let fallback = DataviewValue::Null;
+            DataviewValue::Array(
+                left.into_iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        function(
+                            value,
+                            right
+                                .get(index)
+                                .cloned()
+                                .unwrap_or_else(|| fallback.clone()),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        (DataviewValue::Array(values), right) => DataviewValue::Array(
+            values
+                .into_iter()
+                .map(|value| function(value, right.clone()))
+                .collect(),
+        ),
+        (left, DataviewValue::Array(values)) => DataviewValue::Array(
+            values
+                .into_iter()
+                .map(|value| function(left.clone(), value))
+                .collect(),
+        ),
+        (left, right) => function(left, right),
+    }
+}
+
+fn evaluate_object_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let values = evaluated_args(args, context);
+    let mut object = BTreeMap::new();
+    for pair in values.chunks_exact(2) {
+        object.insert(value_text(&pair[0]), pair[1].clone());
+    }
+    DataviewValue::Object(object)
+}
+
+fn date_value(value: DataviewValue) -> DataviewValue {
+    match value {
+        DataviewValue::Date(_) | DataviewValue::DateTime(_) => value,
+        DataviewValue::Link(link) => date_from_text(&link.path)
+            .or_else(|| {
+                note_stem(&link.path).and_then(|stem| date_from_text(&stem))
+            })
+            .unwrap_or(DataviewValue::Null),
+        value => {
+            date_from_text(&value_text(&value)).unwrap_or(DataviewValue::Null)
+        }
+    }
+}
+
+fn date_from_text(text: &str) -> Option<DataviewValue> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("today") {
+        return Some(DataviewValue::Date(Utc::now().date_naive().to_string()));
+    }
+    if trimmed.eq_ignore_ascii_case("now") {
+        return Some(DataviewValue::DateTime(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        ));
+    }
+    if DateTime::parse_from_rfc3339(trimmed).is_ok()
+        || NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S").is_ok()
+    {
+        return Some(DataviewValue::DateTime(trimmed.to_string()));
+    }
+    if NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").is_ok() {
+        return Some(DataviewValue::Date(trimmed.to_string()));
+    }
+
+    let date = Regex::new(r"\d{4}-\d{2}-\d{2}").expect("valid date regex");
+    date.find(trimmed)
+        .and_then(|match_| date_from_text(match_.as_str()))
+}
+
+fn duration_value(value: DataviewValue) -> DataviewValue {
+    match value {
+        DataviewValue::Duration(_) => value,
+        value => duration_text_to_iso(&value_text(&value))
+            .map(DataviewValue::Duration)
+            .unwrap_or(DataviewValue::Null),
+    }
+}
+
+fn duration_text_to_iso(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('P') && duration_to_millis(trimmed).is_some() {
+        return Some(trimmed.to_string());
+    }
+
+    let unit = Regex::new(
+        r"(?i)([-+]?\d+)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|months?|mos?|mo|years?|yrs?|y)",
+    )
+    .expect("valid duration regex");
+    let mut years = 0i64;
+    let mut months = 0i64;
+    let mut days = 0i64;
+    let mut hours = 0i64;
+    let mut minutes = 0i64;
+    let mut seconds = 0i64;
+    let mut milliseconds = 0i64;
+    let mut matched = false;
+
+    for captures in unit.captures_iter(trimmed) {
+        matched = true;
+        let amount = captures[1].parse::<i64>().ok()?;
+        match captures[2].to_ascii_lowercase().as_str() {
+            "millisecond" | "milliseconds" | "msec" | "msecs" | "ms" => {
+                milliseconds += amount;
+            }
+            "second" | "seconds" | "sec" | "secs" | "s" => seconds += amount,
+            "minute" | "minutes" | "min" | "mins" | "m" => minutes += amount,
+            "hour" | "hours" | "hr" | "hrs" | "h" => hours += amount,
+            "day" | "days" | "d" => days += amount,
+            "week" | "weeks" | "w" => days += amount * 7,
+            "month" | "months" | "mo" | "mos" => months += amount,
+            "year" | "years" | "yr" | "yrs" | "y" => years += amount,
+            _ => return None,
+        }
+    }
+    if !matched {
+        return None;
+    }
+
+    let mut output = String::from("P");
+    if years != 0 {
+        output.push_str(&format!("{years}Y"));
+    }
+    if months != 0 {
+        output.push_str(&format!("{months}M"));
+    }
+    if days != 0 {
+        output.push_str(&format!("{days}D"));
+    }
+    if hours != 0 || minutes != 0 || seconds != 0 || milliseconds != 0 {
+        output.push('T');
+        if hours != 0 {
+            output.push_str(&format!("{hours}H"));
+        }
+        if minutes != 0 {
+            output.push_str(&format!("{minutes}M"));
+        }
+        if milliseconds != 0 {
+            let whole_seconds = seconds + milliseconds / 1000;
+            let millis = milliseconds.rem_euclid(1000);
+            if millis == 0 {
+                if whole_seconds != 0 {
+                    output.push_str(&format!("{whole_seconds}S"));
+                }
+            } else {
+                output.push_str(&format!("{whole_seconds}.{millis:03}S"));
+            }
+        } else if seconds != 0 {
+            output.push_str(&format!("{seconds}S"));
+        }
+    }
+    if output == "P" {
+        output.push_str("T0S");
+    }
+    Some(output)
+}
+
+fn number_value(value: DataviewValue) -> DataviewValue {
+    match value {
+        DataviewValue::Number(_) => value,
+        value => {
+            let number = Regex::new(r"[-+]?\d+(?:\.\d+)?")
+                .expect("valid number extraction regex");
+            number
+                .find(&value_text(&value))
+                .and_then(|match_| {
+                    parse_expression_number(match_.as_str()).ok()
+                })
+                .map(DataviewValue::Number)
+                .unwrap_or(DataviewValue::Null)
+        }
+    }
+}
+
+fn string_value(value: DataviewValue) -> DataviewValue {
+    DataviewValue::String(match value {
+        DataviewValue::Duration(value) => duration_to_human(&value),
+        value => value_text(&value),
+    })
+}
+
+fn duration_to_human(value: &str) -> String {
+    let Some(milliseconds) = duration_to_millis(value) else {
+        return value.to_string();
+    };
+    let mut seconds = milliseconds / 1000;
+    let days = seconds / 86_400;
+    seconds %= 86_400;
+    let hours = seconds / 3_600;
+    seconds %= 3_600;
+    let minutes = seconds / 60;
+    seconds %= 60;
+    for (amount, singular) in [
+        (days, "day"),
+        (hours, "hour"),
+        (minutes, "minute"),
+        (seconds, "second"),
+    ] {
+        if amount != 0 {
+            let suffix = if amount == 1 { "" } else { "s" };
+            return format!("{amount} {singular}{suffix}");
+        }
+    }
+    "0 seconds".to_string()
+}
+
+fn typeof_value(value: DataviewValue) -> DataviewValue {
+    let name = match value {
+        DataviewValue::Null => "null",
+        DataviewValue::Bool(_) => "boolean",
+        DataviewValue::Number(_) => "number",
+        DataviewValue::String(_) => "string",
+        DataviewValue::Date(_) => "date",
+        DataviewValue::DateTime(_) => "date",
+        DataviewValue::Duration(_) => "duration",
+        DataviewValue::Link(_) => "link",
+        DataviewValue::Array(_) => "array",
+        DataviewValue::Object(_) => "object",
+    };
+    DataviewValue::String(name.to_string())
+}
+
+fn evaluate_link_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    embed: bool,
+) -> DataviewValue {
+    let values = evaluated_args(args, context);
+    let ([path] | [path, _]) = values.as_slice() else {
+        return DataviewValue::Null;
+    };
+    let display = values
+        .get(1)
+        .map(value_text)
+        .filter(|value| !value.is_empty());
+    let path_text = value_text(path);
+    DataviewValue::Link(DataviewLink::new(
+        normalized_link_literal_path(&path_text),
+        display,
+        embed,
+        path_text,
+    ))
+}
+
+fn evaluate_external_link_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let values = evaluated_args(args, context);
+    let ([url] | [url, _]) = values.as_slice() else {
+        return DataviewValue::Null;
+    };
+    let url_text = value_text(url);
+    DataviewValue::Link(DataviewLink::new(
+        url_text.clone(),
+        values
+            .get(1)
+            .map(value_text)
+            .filter(|value| !value.is_empty()),
+        false,
+        url_text,
+    ))
+}
+
+fn evaluate_embed_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    match evaluated_args(args, context).as_slice() {
+        [DataviewValue::Link(link)] => {
+            let mut link = link.clone();
+            link.embed = true;
+            DataviewValue::Link(link)
+        }
+        [DataviewValue::Link(link), embed] => {
+            let mut link = link.clone();
+            link.embed = embed.is_truthy();
+            DataviewValue::Link(link)
+        }
+        [_, ..] => evaluate_link_call(args, context, true),
+        _ => DataviewValue::Null,
+    }
+}
+
+fn evaluate_round_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([value] | [value, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let digits = args
+        .get(1)
+        .map(|arg| integer_value(&arg.evaluate(context)))
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+    vectorize_unary(value.evaluate(context), |value| {
+        let Some(number) = numeric_f64(&value) else {
+            return DataviewValue::Null;
+        };
+        let factor = 10_f64.powi(digits as i32);
+        number_from_f64_smart((number * factor).round() / factor)
+    })
+}
+
+fn evaluate_numeric_round_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    function: impl Fn(f64) -> f64 + Copy,
+) -> DataviewValue {
+    evaluate_unary_vector_call(args, context, |value| {
+        numeric_f64(&value)
+            .map(|value| number_from_f64_smart(function(value)))
+            .unwrap_or(DataviewValue::Null)
+    })
+}
+
+fn evaluate_extreme_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    target_ordering: Ordering,
+) -> DataviewValue {
+    let values = aggregate_args(args, context);
+    let mut best: Option<DataviewValue> = None;
+    for value in values {
+        match &best {
+            None => best = Some(value),
+            Some(best_value)
+                if compare_values(context.vault, &value, best_value)
+                    == target_ordering =>
+            {
+                best = Some(value);
+            }
+            _ => {}
+        }
+    }
+    best.unwrap_or(DataviewValue::Null)
+}
+
+#[derive(Clone, Copy)]
+enum NumericAggregate {
+    Average,
+    Product,
+    Sum,
+}
+
+fn evaluate_numeric_aggregate_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    aggregate: NumericAggregate,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    let values = collection_value(arg.evaluate(context));
+    let numbers = values.iter().filter_map(numeric_f64).collect::<Vec<_>>();
+    if numbers.is_empty() {
+        return DataviewValue::Null;
+    }
+    let value = match aggregate {
+        NumericAggregate::Average => {
+            numbers.iter().sum::<f64>() / numbers.len() as f64
+        }
+        NumericAggregate::Product => numbers.iter().product(),
+        NumericAggregate::Sum => numbers.iter().sum(),
+    };
+    number_from_f64_smart(value)
+}
+
+fn evaluate_reduce_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [collection, operator] = args else {
+        return DataviewValue::Null;
+    };
+    let mut values = collection_value(collection.evaluate(context)).into_iter();
+    let Some(mut result) = values.next() else {
+        return DataviewValue::Null;
+    };
+    let operator = value_text(&operator.evaluate(context));
+    for value in values {
+        result = match operator.as_str() {
+            "+" => add_value(result, value),
+            "-" => {
+                numeric_binary_value(result, value, |left, right| left - right)
+            }
+            "*" => multiply_value(result, value),
+            "/" => {
+                numeric_binary_value(result, value, |left, right| left / right)
+            }
+            "&" => DataviewValue::Bool(result.is_truthy() && value.is_truthy()),
+            "|" => DataviewValue::Bool(result.is_truthy() || value.is_truthy()),
+            _ => return DataviewValue::Null,
+        };
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+enum ContainsMode {
+    Contains,
+    Exact,
+    Insensitive,
+}
+
+fn evaluate_contains_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    mode: ContainsMode,
+) -> DataviewValue {
+    let [container, needle] = args else {
+        return DataviewValue::Null;
+    };
+    let container = container.evaluate(context);
+    let needle = needle.evaluate(context);
+    DataviewValue::Bool(contains_value(
+        context.vault,
+        &container,
+        &needle,
+        mode,
+    ))
+}
+
+fn contains_value(
+    vault: &NativeVault,
+    container: &DataviewValue,
+    needle: &DataviewValue,
+    mode: ContainsMode,
+) -> bool {
+    match container {
+        DataviewValue::Object(object) => {
+            let needle = value_text(needle);
+            match mode {
+                ContainsMode::Insensitive => {
+                    object.keys().any(|key| key.eq_ignore_ascii_case(&needle))
+                }
+                ContainsMode::Contains | ContainsMode::Exact => {
+                    object.contains_key(&needle)
+                }
+            }
+        }
+        DataviewValue::Array(values) => values.iter().any(|value| match mode {
+            ContainsMode::Insensitive => {
+                value_text(value).eq_ignore_ascii_case(&value_text(needle))
+            }
+            ContainsMode::Contains | ContainsMode::Exact => {
+                values_equal(vault, value, needle)
+            }
+        }),
+        value => {
+            let haystack = value_text(value);
+            let needle = value_text(needle);
+            match mode {
+                ContainsMode::Insensitive => haystack
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase()),
+                ContainsMode::Contains | ContainsMode::Exact => {
+                    haystack.contains(&needle)
+                }
+            }
+        }
+    }
+}
+
+fn evaluate_containsword_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [container, needle] = args else {
+        return DataviewValue::Null;
+    };
+    let container = container.evaluate(context);
+    let needle = value_text(&needle.evaluate(context)).to_ascii_lowercase();
+    match container {
+        DataviewValue::Array(values) => DataviewValue::Array(
+            values
+                .iter()
+                .map(|value| {
+                    DataviewValue::Bool(text_has_word(
+                        &value_text(value),
+                        &needle,
+                    ))
+                })
+                .collect(),
+        ),
+        value => {
+            DataviewValue::Bool(text_has_word(&value_text(&value), &needle))
+        }
+    }
+}
+
+fn text_has_word(text: &str, needle: &str) -> bool {
+    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .any(|word| word.eq_ignore_ascii_case(needle))
+}
+
+fn evaluate_extract_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [object, keys @ ..] = args else {
+        return DataviewValue::Null;
+    };
+    let DataviewValue::Object(object) = object.evaluate(context) else {
+        return DataviewValue::Null;
+    };
+    let mut extracted = BTreeMap::new();
+    for key in keys {
+        let key = value_text(&key.evaluate(context));
+        if let Some(value) = object.get(&key) {
+            extracted.insert(key, value.clone());
+        }
+    }
+    DataviewValue::Object(extracted)
+}
+
+fn evaluate_sort_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    let mut values = collection_value(arg.evaluate(context));
+    values.sort_by(|left, right| compare_values(context.vault, left, right));
+    DataviewValue::Array(values)
+}
+
+fn evaluate_reverse_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    let mut values = collection_value(arg.evaluate(context));
+    values.reverse();
+    DataviewValue::Array(values)
+}
+
+fn length_value(value: DataviewValue) -> DataviewValue {
+    let length = match value {
+        DataviewValue::Array(values) => values.len(),
+        DataviewValue::Object(values) => values.len(),
+        value => value_text(&value).chars().count(),
+    };
+    DataviewValue::Number(Number::from(length as u64))
+}
+
+fn evaluate_nonnull_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    DataviewValue::Array(
+        collection_value(arg.evaluate(context))
+            .into_iter()
+            .filter(|value| !matches!(value, DataviewValue::Null))
+            .collect(),
+    )
+}
+
+fn evaluate_firstvalue_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    collection_value(arg.evaluate(context))
+        .into_iter()
+        .find(|value| !matches!(value, DataviewValue::Null))
+        .unwrap_or(DataviewValue::Null)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1654,7 +2390,16 @@ fn evaluate_quantifier_call(
                 }
             });
         }
-        _ => return DataviewValue::Null,
+        _ => {
+            let values = evaluated_args(args, context);
+            return DataviewValue::Bool(match quantifier {
+                Quantifier::All => values.iter().all(DataviewValue::is_truthy),
+                Quantifier::Any => values.iter().any(DataviewValue::is_truthy),
+                Quantifier::None => {
+                    !values.iter().any(DataviewValue::is_truthy)
+                }
+            });
+        }
     };
 
     DataviewValue::Bool(match quantifier {
@@ -1662,6 +2407,815 @@ fn evaluate_quantifier_call(
         Quantifier::Any => values.iter().any(DataviewValue::is_truthy),
         Quantifier::None => !values.iter().any(DataviewValue::is_truthy),
     })
+}
+
+fn evaluate_join_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([collection] | [collection, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let separator = args
+        .get(1)
+        .map(|arg| value_text(&arg.evaluate(context)))
+        .unwrap_or_else(|| ", ".to_string());
+    let values = collection_value(collection.evaluate(context));
+    DataviewValue::String(
+        values
+            .iter()
+            .map(value_text)
+            .collect::<Vec<_>>()
+            .join(&separator),
+    )
+}
+
+fn evaluate_unique_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [arg] = args else {
+        return DataviewValue::Null;
+    };
+    let mut unique = Vec::new();
+    for value in collection_value(arg.evaluate(context)) {
+        if !unique
+            .iter()
+            .any(|existing| values_equal(context.vault, existing, &value))
+        {
+            unique.push(value);
+        }
+    }
+    DataviewValue::Array(unique)
+}
+
+fn evaluate_flat_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([collection] | [collection, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let depth = args
+        .get(1)
+        .and_then(|arg| integer_value(&arg.evaluate(context)))
+        .unwrap_or(1)
+        .max(0) as usize;
+    let mut output = Vec::new();
+    flatten_values(
+        collection_value(collection.evaluate(context)),
+        depth,
+        &mut output,
+    );
+    DataviewValue::Array(output)
+}
+
+fn flatten_values(
+    values: Vec<DataviewValue>,
+    depth: usize,
+    output: &mut Vec<DataviewValue>,
+) {
+    for value in values {
+        match value {
+            DataviewValue::Array(values) if depth > 0 => {
+                flatten_values(values, depth - 1, output);
+            }
+            value => output.push(value),
+        }
+    }
+}
+
+fn evaluate_slice_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([collection] | [collection, _] | [collection, _, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let start = args
+        .get(1)
+        .and_then(|arg| integer_value(&arg.evaluate(context)))
+        .unwrap_or(0);
+    let end = args
+        .get(2)
+        .and_then(|arg| integer_value(&arg.evaluate(context)));
+    let values = collection_value(collection.evaluate(context));
+    let (start, end) = slice_bounds(values.len(), start, end);
+    DataviewValue::Array(values[start..end].to_vec())
+}
+
+fn slice_bounds(length: usize, start: i64, end: Option<i64>) -> (usize, usize) {
+    let length_i64 = length as i64;
+    let start = if start < 0 { length_i64 + start } else { start }
+        .clamp(0, length_i64) as usize;
+    let end = end.unwrap_or(length_i64);
+    let end = if end < 0 { length_i64 + end } else { end }
+        .clamp(start as i64, length_i64) as usize;
+    (start, end)
+}
+
+fn evaluate_regex_test_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    full_match: bool,
+) -> DataviewValue {
+    let [pattern, input] = args else {
+        return DataviewValue::Null;
+    };
+    let pattern = value_text(&pattern.evaluate(context));
+    let input = input.evaluate(context);
+    vectorize_unary(input, |input| {
+        let text = value_text(&input);
+        let pattern = if full_match {
+            format!("^(?:{pattern})$")
+        } else {
+            pattern.clone()
+        };
+        Regex::new(&pattern)
+            .map(|regex| DataviewValue::Bool(regex.is_match(&text)))
+            .unwrap_or(DataviewValue::Bool(false))
+    })
+}
+
+fn evaluate_regex_replace_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [input, pattern, replacement] = args else {
+        return DataviewValue::Null;
+    };
+    let pattern = value_text(&pattern.evaluate(context));
+    let replacement = value_text(&replacement.evaluate(context));
+    let Ok(regex) = Regex::new(&pattern) else {
+        return DataviewValue::Null;
+    };
+    vectorize_unary(input.evaluate(context), |input| {
+        DataviewValue::String(
+            regex
+                .replace_all(&value_text(&input), replacement.as_str())
+                .into_owned(),
+        )
+    })
+}
+
+fn evaluate_replace_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [input, pattern, replacement] = args else {
+        return DataviewValue::Null;
+    };
+    let pattern = value_text(&pattern.evaluate(context));
+    let replacement = value_text(&replacement.evaluate(context));
+    vectorize_unary(input.evaluate(context), |input| {
+        DataviewValue::String(
+            value_text(&input).replace(&pattern, &replacement),
+        )
+    })
+}
+
+fn string_map(
+    value: DataviewValue,
+    function: impl FnOnce(&str) -> String,
+) -> DataviewValue {
+    DataviewValue::String(function(&value_text(&value)))
+}
+
+fn evaluate_split_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([input, delimiter] | [input, delimiter, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let delimiter = value_text(&delimiter.evaluate(context));
+    let limit = args
+        .get(2)
+        .and_then(|arg| integer_value(&arg.evaluate(context)))
+        .map(|value| value.max(0) as usize);
+    let Ok(regex) = Regex::new(&delimiter) else {
+        return DataviewValue::Null;
+    };
+    vectorize_unary(input.evaluate(context), |input| {
+        let pieces = regex
+            .split(&value_text(&input))
+            .map(|value| DataviewValue::String(value.to_string()))
+            .take(limit.unwrap_or(usize::MAX))
+            .collect();
+        DataviewValue::Array(pieces)
+    })
+}
+
+fn evaluate_string_predicate_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    predicate: impl Fn(&str, &str) -> bool + Copy,
+) -> DataviewValue {
+    let [input, needle] = args else {
+        return DataviewValue::Null;
+    };
+    let needle = value_text(&needle.evaluate(context));
+    vectorize_unary(input.evaluate(context), |input| {
+        DataviewValue::Bool(predicate(&value_text(&input), &needle))
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PadSide {
+    Left,
+    Right,
+}
+
+fn evaluate_pad_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    side: PadSide,
+) -> DataviewValue {
+    let ([input, length] | [input, length, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let length =
+        integer_value(&length.evaluate(context)).unwrap_or(0).max(0) as usize;
+    let padding = args
+        .get(2)
+        .map(|arg| value_text(&arg.evaluate(context)))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| " ".to_string());
+    vectorize_unary(input.evaluate(context), |input| {
+        DataviewValue::String(pad_text(
+            &value_text(&input),
+            length,
+            &padding,
+            side,
+        ))
+    })
+}
+
+fn pad_text(
+    input: &str,
+    length: usize,
+    padding: &str,
+    side: PadSide,
+) -> String {
+    let current = input.chars().count();
+    if current >= length {
+        return input.to_string();
+    }
+    let mut pad = String::new();
+    while pad.chars().count() < length - current {
+        pad.push_str(padding);
+    }
+    let pad = pad.chars().take(length - current).collect::<String>();
+    match side {
+        PadSide::Left => format!("{pad}{input}"),
+        PadSide::Right => format!("{input}{pad}"),
+    }
+}
+
+fn evaluate_substring_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([input, start] | [input, start, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let start = integer_value(&start.evaluate(context)).unwrap_or(0);
+    let end = args
+        .get(2)
+        .and_then(|arg| integer_value(&arg.evaluate(context)));
+    vectorize_unary(input.evaluate(context), |input| {
+        let text = value_text(&input);
+        let chars = text.chars().collect::<Vec<_>>();
+        let (start, end) = slice_bounds(chars.len(), start, end);
+        DataviewValue::String(chars[start..end].iter().collect())
+    })
+}
+
+fn evaluate_truncate_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([input, length] | [input, length, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let length =
+        integer_value(&length.evaluate(context)).unwrap_or(0).max(0) as usize;
+    let suffix = args
+        .get(2)
+        .map(|arg| value_text(&arg.evaluate(context)))
+        .unwrap_or_else(|| "...".to_string());
+    vectorize_unary(input.evaluate(context), |input| {
+        DataviewValue::String(truncate_text(
+            &value_text(&input),
+            length,
+            &suffix,
+        ))
+    })
+}
+
+fn truncate_text(input: &str, length: usize, suffix: &str) -> String {
+    let input_len = input.chars().count();
+    if input_len <= length {
+        return input.to_string();
+    }
+    let suffix_len = suffix.chars().count();
+    if suffix_len >= length {
+        return suffix.chars().take(length).collect();
+    }
+    let prefix = input.chars().take(length - suffix_len).collect::<String>();
+    format!("{prefix}{suffix}")
+}
+
+fn evaluate_default_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+    vectorized: bool,
+) -> DataviewValue {
+    let [value, fallback] = args else {
+        return DataviewValue::Null;
+    };
+    let value = value.evaluate(context);
+    let fallback = fallback.evaluate(context);
+    if vectorized {
+        vectorize_binary(value, fallback, default_pair)
+    } else {
+        default_pair(value, fallback)
+    }
+}
+
+fn default_pair(
+    value: DataviewValue,
+    fallback: DataviewValue,
+) -> DataviewValue {
+    if matches!(value, DataviewValue::Null) {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn display_value(value: DataviewValue) -> DataviewValue {
+    DataviewValue::String(display_text(&value))
+}
+
+fn display_text(value: &DataviewValue) -> String {
+    match value {
+        DataviewValue::Link(link) => {
+            link.display.clone().unwrap_or_else(|| {
+                note_stem(&link.path).unwrap_or_else(|| link.path.clone())
+            })
+        }
+        DataviewValue::Array(values) => values
+            .iter()
+            .map(display_text)
+            .collect::<Vec<_>>()
+            .join(", "),
+        DataviewValue::String(value) => markdown_display_text(value),
+        value => value_text(value),
+    }
+}
+
+fn markdown_display_text(value: &str) -> String {
+    let wikilink =
+        Regex::new(r"!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]")
+            .expect("valid wikilink display regex");
+    let markdown_link = Regex::new(r"\[([^\]]+)\]\([^)]+\)")
+        .expect("valid markdown link regex");
+    let emphasis = Regex::new(r"[*_`]").expect("valid emphasis cleanup regex");
+    let value =
+        wikilink.replace_all(value, |captures: &regex::Captures<'_>| {
+            captures
+                .get(2)
+                .or_else(|| captures.get(1))
+                .map(|match_| match_.as_str())
+                .unwrap_or_default()
+                .to_string()
+        });
+    let value = markdown_link.replace_all(&value, "$1");
+    emphasis.replace_all(&value, "").into_owned()
+}
+
+fn evaluate_choice_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [condition, left, right] = args else {
+        return DataviewValue::Null;
+    };
+    if condition.evaluate(context).is_truthy() {
+        left.evaluate(context)
+    } else {
+        right.evaluate(context)
+    }
+}
+
+fn evaluate_hash_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let values = evaluated_args(args, context);
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value_text(&value));
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    let value = u64::from_be_bytes(bytes) & 0x7fff_ffff_ffff_ffff;
+    DataviewValue::Number(Number::from(value))
+}
+
+fn striptime_value(value: DataviewValue) -> DataviewValue {
+    match value {
+        DataviewValue::Date(_) => value,
+        DataviewValue::DateTime(value) | DataviewValue::String(value) => {
+            date_from_text(&value)
+                .and_then(|value| match value {
+                    DataviewValue::Date(date) => {
+                        Some(DataviewValue::Date(date))
+                    }
+                    DataviewValue::DateTime(datetime) => datetime
+                        .split_once('T')
+                        .map(|(date, _)| DataviewValue::Date(date.to_string())),
+                    _ => None,
+                })
+                .unwrap_or(DataviewValue::Null)
+        }
+        _ => DataviewValue::Null,
+    }
+}
+
+fn evaluate_dateformat_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [date, format] = args else {
+        return DataviewValue::Null;
+    };
+    let format = value_text(&format.evaluate(context));
+    vectorize_unary(date.evaluate(context), |value| {
+        date_components(&value)
+            .map(|date| DataviewValue::String(format_date(&date, &format)))
+            .unwrap_or(DataviewValue::Null)
+    })
+}
+
+struct DateComponents {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    timestamp_millis: Option<i64>,
+}
+
+fn date_components(value: &DataviewValue) -> Option<DateComponents> {
+    let value = match value {
+        DataviewValue::Date(value)
+        | DataviewValue::DateTime(value)
+        | DataviewValue::String(value) => value.as_str(),
+        _ => return None,
+    };
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        let datetime = datetime.with_timezone(&Utc);
+        return Some(DateComponents {
+            year: datetime
+                .naive_utc()
+                .date()
+                .format("%Y")
+                .to_string()
+                .parse()
+                .ok()?,
+            month: datetime
+                .naive_utc()
+                .date()
+                .format("%m")
+                .to_string()
+                .parse()
+                .ok()?,
+            day: datetime
+                .naive_utc()
+                .date()
+                .format("%d")
+                .to_string()
+                .parse()
+                .ok()?,
+            hour: datetime
+                .naive_utc()
+                .time()
+                .format("%H")
+                .to_string()
+                .parse()
+                .ok()?,
+            minute: datetime
+                .naive_utc()
+                .time()
+                .format("%M")
+                .to_string()
+                .parse()
+                .ok()?,
+            second: datetime
+                .naive_utc()
+                .time()
+                .format("%S")
+                .to_string()
+                .parse()
+                .ok()?,
+            timestamp_millis: Some(datetime.timestamp_millis()),
+        });
+    }
+    if let Ok(datetime) =
+        NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+    {
+        return Some(DateComponents {
+            year: datetime.date().format("%Y").to_string().parse().ok()?,
+            month: datetime.date().format("%m").to_string().parse().ok()?,
+            day: datetime.date().format("%d").to_string().parse().ok()?,
+            hour: datetime.time().format("%H").to_string().parse().ok()?,
+            minute: datetime.time().format("%M").to_string().parse().ok()?,
+            second: datetime.time().format("%S").to_string().parse().ok()?,
+            timestamp_millis: Some(datetime.and_utc().timestamp_millis()),
+        });
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some(DateComponents {
+            year: date.format("%Y").to_string().parse().ok()?,
+            month: date.format("%m").to_string().parse().ok()?,
+            day: date.format("%d").to_string().parse().ok()?,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            timestamp_millis: date
+                .and_hms_opt(0, 0, 0)
+                .map(|datetime| datetime.and_utc().timestamp_millis()),
+        });
+    }
+    None
+}
+
+fn format_date(date: &DateComponents, format: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0usize;
+    while index < format.len() {
+        let rest = &format[index..];
+        let (replacement, width) =
+            if rest.starts_with("yyyy") || rest.starts_with("YYYY") {
+                (format!("{:04}", date.year), 4)
+            } else if rest.starts_with("yy") || rest.starts_with("YY") {
+                (format!("{:02}", date.year.rem_euclid(100)), 2)
+            } else if rest.starts_with("MM") {
+                (format!("{:02}", date.month), 2)
+            } else if rest.starts_with('M') {
+                (date.month.to_string(), 1)
+            } else if rest.starts_with("dd") || rest.starts_with("DD") {
+                (format!("{:02}", date.day), 2)
+            } else if rest.starts_with('d') || rest.starts_with('D') {
+                (date.day.to_string(), 1)
+            } else if rest.starts_with("HH") {
+                (format!("{:02}", date.hour), 2)
+            } else if rest.starts_with('H') {
+                (date.hour.to_string(), 1)
+            } else if rest.starts_with("mm") {
+                (format!("{:02}", date.minute), 2)
+            } else if rest.starts_with('m') {
+                (date.minute.to_string(), 1)
+            } else if rest.starts_with("ss") {
+                (format!("{:02}", date.second), 2)
+            } else if rest.starts_with('s') {
+                (date.second.to_string(), 1)
+            } else if rest.starts_with('x') {
+                (date.timestamp_millis.unwrap_or_default().to_string(), 1)
+            } else {
+                let ch = rest.chars().next().expect("non-empty format rest");
+                output.push(ch);
+                index += ch.len_utf8();
+                continue;
+            };
+        output.push_str(&replacement);
+        index += width;
+    }
+    output
+}
+
+fn evaluate_durationformat_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let [duration, format] = args else {
+        return DataviewValue::Null;
+    };
+    let format = value_text(&format.evaluate(context));
+    vectorize_unary(duration.evaluate(context), |value| {
+        let duration = match value {
+            DataviewValue::Duration(value) | DataviewValue::String(value) => {
+                value
+            }
+            _ => return DataviewValue::Null,
+        };
+        duration_to_millis(&duration)
+            .map(|millis| {
+                DataviewValue::String(format_duration(millis, &format))
+            })
+            .unwrap_or(DataviewValue::Null)
+    })
+}
+
+fn duration_to_millis(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if !value.starts_with('P') {
+        return duration_text_to_iso(value)
+            .and_then(|iso| duration_to_millis(&iso));
+    }
+    let token = Regex::new(r"(?i)([-+]?\d+(?:\.\d+)?)(Y|M|W|D|H|S)")
+        .expect("valid ISO duration regex");
+    let mut in_time = false;
+    let mut millis = 0f64;
+    for ch in value.chars() {
+        if ch == 'T' {
+            in_time = true;
+        }
+    }
+    let mut time_position = false;
+    for captures in token.captures_iter(value) {
+        let amount = captures[1].parse::<f64>().ok()?;
+        let unit = &captures[2];
+        let before = &value[..captures.get(0)?.start()];
+        if before.contains('T') {
+            time_position = true;
+        }
+        millis += match unit {
+            "Y" | "y" => amount * 365.0 * 86_400_000.0,
+            "M" | "m" if !time_position && !in_time => {
+                amount * 30.0 * 86_400_000.0
+            }
+            "M" | "m" if !time_position => amount * 30.0 * 86_400_000.0,
+            "M" | "m" => amount * 60_000.0,
+            "W" | "w" => amount * 7.0 * 86_400_000.0,
+            "D" | "d" => amount * 86_400_000.0,
+            "H" | "h" => amount * 3_600_000.0,
+            "S" | "s" => amount * 1_000.0,
+            _ => return None,
+        };
+    }
+    Some(millis.round() as i64)
+}
+
+fn format_duration(milliseconds: i64, format: &str) -> String {
+    let total_seconds = milliseconds / 1000;
+    let total_minutes = total_seconds / 60;
+    let total_hours = total_minutes / 60;
+    let total_days = total_hours / 24;
+    let total_weeks = total_days / 7;
+    let total_months = total_days / 30;
+    let total_years = total_days / 365;
+    let components = [
+        ("yyyy", format!("{total_years:04}")),
+        ("yyy", format!("{total_years:03}")),
+        ("yy", format!("{total_years:02}")),
+        ("y", total_years.to_string()),
+        ("MMMM", format!("{total_months:04}")),
+        ("MMM", format!("{total_months:03}")),
+        ("MM", format!("{total_months:02}")),
+        ("M", total_months.to_string()),
+        ("www", format!("{total_weeks:03}")),
+        ("ww", format!("{total_weeks:02}")),
+        ("w", total_weeks.to_string()),
+        ("ddd", format!("{total_days:03}")),
+        ("dd", format!("{total_days:02}")),
+        ("d", total_days.to_string()),
+        ("hh", format!("{:02}", total_hours % 24)),
+        ("h", (total_hours % 24).to_string()),
+        ("mm", format!("{:02}", total_minutes % 60)),
+        ("m", (total_minutes % 60).to_string()),
+        ("ss", format!("{:02}", total_seconds % 60)),
+        ("s", (total_seconds % 60).to_string()),
+        ("SSS", format!("{:03}", milliseconds % 1000)),
+        ("S", (milliseconds % 1000).to_string()),
+    ];
+
+    let mut output = String::new();
+    let mut index = 0usize;
+    let mut literal = false;
+    while index < format.len() {
+        let rest = &format[index..];
+        if rest.starts_with('\'') {
+            literal = !literal;
+            index += 1;
+            continue;
+        }
+        if !literal
+            && let Some((token, replacement)) =
+                components.iter().find(|(token, _)| rest.starts_with(token))
+        {
+            output.push_str(replacement);
+            index += token.len();
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty duration format rest");
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn evaluate_currencyformat_call(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> DataviewValue {
+    let ([number] | [number, _]) = args else {
+        return DataviewValue::Null;
+    };
+    let currency = args
+        .get(1)
+        .map(|arg| value_text(&arg.evaluate(context)))
+        .unwrap_or_else(|| "USD".to_string());
+    vectorize_unary(number.evaluate(context), |value| {
+        numeric_f64(&value)
+            .map(|number| {
+                DataviewValue::String(format_currency(number, &currency))
+            })
+            .unwrap_or(DataviewValue::Null)
+    })
+}
+
+fn format_currency(number: f64, currency: &str) -> String {
+    let symbol = match currency.to_ascii_uppercase().as_str() {
+        "USD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        _ => currency,
+    };
+    format!("{symbol}{}", format_number_with_commas(number))
+}
+
+fn format_number_with_commas(number: f64) -> String {
+    let sign = if number < 0.0 { "-" } else { "" };
+    let abs = number.abs();
+    let formatted = format!("{abs:.2}");
+    let (whole, fraction) = formatted
+        .split_once('.')
+        .expect("fixed precision includes decimal");
+    let mut grouped = String::new();
+    for (index, ch) in whole.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    let whole = grouped.chars().rev().collect::<String>();
+    format!("{sign}{whole}.{fraction}")
+}
+
+fn localtime_value(value: DataviewValue) -> DataviewValue {
+    match value {
+        DataviewValue::Date(_) | DataviewValue::DateTime(_) => value,
+        value => date_value(value),
+    }
+}
+
+fn meta_value(value: DataviewValue) -> DataviewValue {
+    let DataviewValue::Link(link) = value else {
+        return DataviewValue::Null;
+    };
+    let (path, subpath) = link
+        .path
+        .split_once('#')
+        .map_or((link.path.as_str(), None), |(path, subpath)| {
+            (path, Some(subpath))
+        });
+    let subpath =
+        subpath.map(|subpath| subpath.trim_start_matches('^').to_string());
+    let link_type = match subpath.as_deref() {
+        None => "file",
+        Some(raw) if link.path.contains("#^") || raw.starts_with('^') => {
+            "block"
+        }
+        Some(_) => "header",
+    };
+    let mut object = BTreeMap::new();
+    object.insert(
+        "display".to_string(),
+        link.display
+            .clone()
+            .map(DataviewValue::String)
+            .unwrap_or(DataviewValue::Null),
+    );
+    object.insert("embed".to_string(), DataviewValue::Bool(link.embed));
+    object.insert("path".to_string(), DataviewValue::String(path.to_string()));
+    object.insert(
+        "subpath".to_string(),
+        subpath
+            .map(DataviewValue::String)
+            .unwrap_or(DataviewValue::Null),
+    );
+    object.insert(
+        "type".to_string(),
+        DataviewValue::String(link_type.to_string()),
+    );
+    DataviewValue::Object(object)
 }
 
 fn evaluate_extreme_by_call(
@@ -1710,6 +3264,35 @@ fn collection_value(value: DataviewValue) -> Vec<DataviewValue> {
         DataviewValue::Array(values) => values,
         DataviewValue::Null => Vec::new(),
         value => vec![value],
+    }
+}
+
+fn aggregate_args(
+    args: &[NativeExpr],
+    context: &EvalContext<'_>,
+) -> Vec<DataviewValue> {
+    match args {
+        [arg] => collection_value(arg.evaluate(context)),
+        args => evaluated_args(args, context),
+    }
+}
+
+fn numeric_f64(value: &DataviewValue) -> Option<f64> {
+    match value {
+        DataviewValue::Number(number) => number.as_f64(),
+        _ => None,
+    }
+}
+
+fn integer_value(value: &DataviewValue) -> Option<i64> {
+    match value {
+        DataviewValue::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number.as_u64().and_then(|value| i64::try_from(value).ok())
+            })
+            .or_else(|| number.as_f64().map(|value| value as i64)),
+        _ => None,
     }
 }
 
@@ -1813,13 +3396,11 @@ fn arithmetic_value(
     match op {
         NativeBinaryOp::Add => add_value(left, right),
         NativeBinaryOp::Subtract => {
-            numeric_value(left, right, |left, right| left - right)
+            numeric_binary_value(left, right, |left, right| left - right)
         }
-        NativeBinaryOp::Multiply => {
-            numeric_value(left, right, |left, right| left * right)
-        }
+        NativeBinaryOp::Multiply => multiply_value(left, right),
         NativeBinaryOp::Divide => {
-            numeric_value(left, right, |left, right| left / right)
+            numeric_binary_value(left, right, |left, right| left / right)
         }
         NativeBinaryOp::And
         | NativeBinaryOp::Equal
@@ -1871,7 +3452,7 @@ fn add_numbers(left: &Number, right: &Number) -> DataviewValue {
     )
 }
 
-fn numeric_value(
+fn numeric_binary_value(
     left: DataviewValue,
     right: DataviewValue,
     op: impl FnOnce(f64, f64) -> f64,
@@ -1881,10 +3462,24 @@ fn numeric_value(
     else {
         return DataviewValue::Null;
     };
-    number_from_f64(op(
+    number_from_f64_smart(op(
         left.as_f64().unwrap_or(0.0),
         right.as_f64().unwrap_or(0.0),
     ))
+}
+
+fn multiply_value(left: DataviewValue, right: DataviewValue) -> DataviewValue {
+    match (&left, &right) {
+        (DataviewValue::String(text), DataviewValue::Number(number))
+        | (DataviewValue::Number(number), DataviewValue::String(text)) => {
+            let count = number
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0);
+            DataviewValue::String(text.repeat(count))
+        }
+        _ => numeric_binary_value(left, right, |left, right| left * right),
+    }
 }
 
 fn negate_value(value: DataviewValue) -> DataviewValue {
@@ -1903,6 +3498,19 @@ fn number_from_f64(value: f64) -> DataviewValue {
     Number::from_f64(value)
         .map(DataviewValue::Number)
         .unwrap_or(DataviewValue::Null)
+}
+
+fn number_from_f64_smart(value: f64) -> DataviewValue {
+    if !value.is_finite() {
+        return DataviewValue::Null;
+    }
+    if value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        return DataviewValue::Number(Number::from(value as i64));
+    }
+    number_from_f64(value)
 }
 
 fn value_text(value: &DataviewValue) -> String {
@@ -2432,6 +4040,28 @@ impl NativeParser {
                     Ok(NativeExpr::Identifier(identifier))
                 }
             }
+            NativeToken::List => {
+                self.position += 1;
+                if self.take_lparen() {
+                    Ok(NativeExpr::Call {
+                        function: "list".to_string(),
+                        args: self.parse_call_args()?,
+                    })
+                } else {
+                    Err("LIST is only valid as a query type or list(...) constructor".to_string())
+                }
+            }
+            NativeToken::Sort => {
+                self.position += 1;
+                if self.take_lparen() {
+                    Ok(NativeExpr::Call {
+                        function: "sort".to_string(),
+                        args: self.parse_call_args()?,
+                    })
+                } else {
+                    Err("SORT is only valid as a data command or sort(...) function".to_string())
+                }
+            }
             NativeToken::LParen => {
                 self.position += 1;
                 let expr = self.parse_expr()?;
@@ -2577,7 +4207,10 @@ impl NativeParser {
             if matches!(token, NativeToken::Eof) {
                 break;
             }
-            if depth == 0 && stop.stops_at(token) {
+            if depth == 0
+                && stop.stops_at(token)
+                && !self.current_token_starts_function_call()
+            {
                 break;
             }
 
@@ -2870,6 +4503,14 @@ impl NativeParser {
         self.tokens
             .get(self.position)
             .unwrap_or_else(|| self.tokens.last().expect("lexer adds EOF"))
+    }
+
+    fn current_token_starts_function_call(&self) -> bool {
+        matches!(self.peek(), NativeToken::Sort)
+            && matches!(
+                self.tokens.get(self.position + 1),
+                Some(NativeToken::LParen)
+            )
     }
 
     fn at_eof(&self) -> bool {

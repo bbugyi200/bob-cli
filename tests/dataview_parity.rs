@@ -573,6 +573,150 @@ fn dataview_native_expression_core_supports_swizzling_and_lambdas() {
 }
 
 #[test]
+fn dataview_native_function_library_supports_constructors_and_utilities() {
+    let output = run_native_fixture(&[
+        "--format",
+        "json",
+        "--query",
+        r#"TABLE object("name", file.name).name AS obj, list(1,2,3) AS listed, date("2026-06-15") = due AS parsed_due, dur("2 hours") = estimate AS parsed_dur, number("score: 9") AS parsed_num, string(ready) AS ready_text, typeof(owner) AS owner_type, link("People/Ada Lovelace", "Ada") = owner AS link_eq, meta([[Projects/Alpha#Next Actions]]).subpath AS subpath, meta(embed(link("Projects/Alpha"))).embed AS embedded, default(missing, "fallback") AS fallback, choice(ready, "yes", "no") AS chosen, striptime(started) AS started_day, dateformat(due, "yyyy-MM-dd") AS due_text, durationformat(estimate, "h") AS estimate_hours, currencyformat(budget, "USD") AS budget_text, typeof(hash("seed", file.name)) AS hash_type FROM "Projects/Alpha.md""#,
+    ]);
+
+    assert_success(&output);
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
+    let json = json_stdout(&output);
+    assert_eq!(json["paths"], json!(["Projects/Alpha.md"]));
+    assert_eq!(
+        json["result"]["values"][0],
+        json!([
+            "Alpha",
+            [1, 2, 3],
+            true,
+            true,
+            9,
+            "true",
+            "link",
+            true,
+            "Next Actions",
+            true,
+            "fallback",
+            "yes",
+            "2026-06-01",
+            "2026-06-15",
+            "2",
+            "$42.00",
+            "number"
+        ])
+    );
+}
+
+#[test]
+fn dataview_native_function_library_supports_numeric_and_container_functions() {
+    let output = run_native_fixture(&[
+        "--format",
+        "json",
+        "--query",
+        r##"TABLE round(16.555, 2) AS rounded, trunc(-93.333) AS truncated, floor(-0.837) AS floored, ceil(12.1) AS ceiled, min([3,1,2]) AS minv, max(1,2,3) AS maxv, sum([1,2,3]) AS summed, product([1,2,3]) AS multiplied, reduce([100,20,3], "-") AS reduced, average([1,2,3]) AS averaged, contains(file, "ctime") AS has_ctime, contains(file.tags, "#project") AS has_project, icontains(status, "ACT") AS active_ci, econtains(aliases, "Alpha") AS exact_alias, containsword("Hello there chaps!", "chaps") AS word, extract(file, "name", "path").name AS extracted, sort([3,1,2]) AS sorted, reverse(["a","b"]) AS reversed, length(file.aliases) AS alias_count, nonnull([null,false]) AS nonnulls, firstvalue([null,owner]) AS first, all(true, ready) AS all_ready, any(false, ready) AS any_ready, none([false,false]) AS none_true, join(["a","b"], ":") AS joined, unique([1,3,1]) AS uniquev, flat([1,[2,[3]]], 2) AS flattened, slice([1,2,3,4], -2) AS sliced FROM "Projects/Alpha.md""##,
+    ]);
+
+    assert_success(&output);
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
+    let json = json_stdout(&output);
+    assert_eq!(
+        json["result"]["values"][0],
+        json!([
+            16.56,
+            -93,
+            -1,
+            13,
+            1,
+            3,
+            6,
+            6,
+            77,
+            2,
+            true,
+            true,
+            true,
+            true,
+            true,
+            "Alpha",
+            [1, 2, 3],
+            ["b", "a"],
+            2,
+            [false],
+            dataview_link("People/Ada Lovelace.md", Some("Ada")),
+            true,
+            true,
+            true,
+            "a:b",
+            [1, 3],
+            [1, 2, 3],
+            [3, 4]
+        ])
+    );
+}
+
+#[test]
+fn dataview_native_function_library_supports_string_functions() {
+    let output = run_native_fixture(&[
+        "--format",
+        "json",
+        "--query",
+        r#"TABLE regextest("\\w+", file.name) AS regex_test, regexmatch("Alpha", file.name) AS regex_match, regexreplace("Suite 1000", "\\d+", "-") AS regex_replaced, replace("what", "wh", "h") AS replaced, lower(priority) AS lowered, upper(status) AS uppered, split("hello world", " ") AS splitv, startswith(file.path, "Projects/") AS starts, endswith(file.path, "Alpha.md") AS ends, padleft("yes", 5, "!") AS leftpadded, padright("yes", 5, "!") AS rightpadded, substring("hello", 2) AS substr, truncate("Hello there!", 8) AS truncated FROM "Projects/Alpha.md""#,
+    ]);
+
+    assert_success(&output);
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
+    let json = json_stdout(&output);
+    assert_eq!(
+        json["result"]["values"][0],
+        json!([
+            true,
+            true,
+            "Suite -",
+            "hat",
+            "high",
+            "ACTIVE",
+            ["hello", "world"],
+            true,
+            true,
+            "!!yes",
+            "yes!!",
+            "llo",
+            "Hello..."
+        ])
+    );
+}
+
+#[test]
+fn dataview_native_function_library_works_in_where_sort_and_list() {
+    let output = run_native_fixture(&[
+        "--query",
+        r##"LIST FROM "Projects" WHERE contains(file.tags, "#project") AND default(status, "missing") != "waiting" SORT lower(file.name) DESC LIMIT 2"##,
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Projects/Gamma.md\nProjects/Alpha.md\n",
+        "native function WHERE/SORT paths changed:\n{}",
+        format_output(&output)
+    );
+    assert!(stderr(&output).is_empty(), "{}", format_output(&output));
+
+    let list = run_native_fixture(&[
+        "--format",
+        "json",
+        "--query",
+        r#"LIST join(sort(file.aliases), "|") FROM "Projects/Alpha.md""#,
+    ]);
+    assert_success(&list);
+    assert!(stderr(&list).is_empty(), "{}", format_output(&list));
+    let json = json_stdout(&list);
+    assert_eq!(json["result"]["values"], json!(["Alpha|Project Alpha"]));
+}
+
+#[test]
 fn dataview_native_expected_failures_record_future_parity_contract() {
     let cases = [
         NativeFailureCase {
