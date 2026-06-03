@@ -244,19 +244,38 @@ of the hash, so editing only a comment updates the block without changing its
 ID. If a previously generated block disappears from the sidecar, the command
 keeps the old block ID under `### Removed highlights` with a tombstone message.
 
-## MacBook Setup Outline
+## MacBook Setup Guide
 
-Run these steps on the MacBook to test the marker/frontmatter sync against real
-Highlights files:
+Run these steps on the MacBook. The intended checkout is
+`~/projects/bob-cli`, and the intended vault paths are `~/bob/lib` for PDFs and
+`~/bob/ref` for generated reference notes.
+
+This Linux host currently has `~/bob/lit`, but the requested MVP defaults are
+still `~/bob/lib` and `~/bob/ref`. Do not infer `lit` as the production default.
+If a one-off test must use `lit`, pass `--lib-dir lit` explicitly.
+
+Install prerequisites if needed:
 
 ```bash
-cd ~/projects
-git clone git@github.com:bbugyi200/bob-cli.git bob-cli
-cd ~/projects/bob-cli
-cargo install --path ~/projects/bob-cli --locked --force
+xcode-select --install
+command -v cargo >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
 
-Confirm the vault layout:
+Clone or update `bob-cli`, then install the local checkout:
+
+```bash
+mkdir -p ~/projects
+if [ -d ~/projects/bob-cli/.git ]; then
+  git -C ~/projects/bob-cli pull --ff-only
+else
+  git clone git@github.com:bbugyi200/bob-cli.git ~/projects/bob-cli
+fi
+cargo install --path ~/projects/bob-cli --locked --force
+bob highlights-ref --help
+```
+
+Create or confirm the vault layout:
 
 ```bash
 mkdir -p ~/bob/lib ~/bob/ref
@@ -265,14 +284,27 @@ git -C ~/bob status --short
 
 In Highlights Pro on the MacBook:
 
-- Keep PDFs under `~/bob/lib`.
-- Enable sidecar autosave next to PDFs.
-- Use the Markdown sidecar format documented above: page headings, annotation
-  spacers, blockquote highlights, and comment/note paragraphs.
-- Add one standalone PDF note as the first note annotation.
-- Put at least `- status: reading` in that first standalone note.
+- Keep PDFs that should sync under `~/bob/lib`.
+- Enable autosaved Markdown sidecars next to each PDF, so
+  `~/bob/lib/example.pdf` gets `~/bob/lib/example.md`.
+- Prefer Markdown sidecars over TextBundle for the MVP.
+- Lock the Highlights Note Format to the sidecar contract above: page headings,
+  `---` annotation separators, highlights as blockquote lines, highlight
+  comments as plain paragraphs, and standalone notes as plain paragraphs.
+- Add exactly one marker note as the first standalone PDF note annotation.
+- Put at least `- status: reading` in that first standalone note. `parent` is
+  optional because the command falls back to `[[obsidian]]`.
 
-Initial command checks:
+Use this marker as a starting point:
+
+```text
+- status: reading
+- parent: [[obsidian]]
+- title: Example Title
+- topics: [example]
+```
+
+Run the initial checks:
 
 ```bash
 bob highlights-ref doctor
@@ -281,23 +313,232 @@ bob highlights-ref sync ~/bob/lib/example.pdf --dry-run
 bob highlights-ref marker ~/bob/lib/example.pdf
 ```
 
-Before first writes:
+The sync model is deliberately asymmetric:
+
+- Marker/frontmatter fields are 2-way and can conflict.
+- Highlights, highlight comments, and standalone non-marker notes are PDF or
+  sidecar to reference note only.
+- Edits inside the managed `<!-- highlights:begin -->` region in Obsidian may be
+  overwritten.
+
+Enable note writes only after reviewing the dry-run output:
 
 ```bash
 git -C ~/bob status --short
+bob highlights-ref sync ~/bob/lib/example.pdf
+bob highlights-ref scan
 ```
 
-Commit or stash unrelated vault edits before enabling sync writes. Keep
-Highlights and Obsidian idle while PDF marker writes are being tested so the
-apps do not race the CLI.
-
-## Automation Outline
-
-The MVP automation target is a scheduled `scan`, not a live recursive watcher.
-Start with a dry-run schedule:
+`scan` does not enable PDF marker write-back. If a dry run reports
+`pdf_marker_action: would-update`, handle that PDF with a targeted command after
+backing up the PDF:
 
 ```bash
-bob highlights-ref scan --dry-run
+bob highlights-ref sync ~/bob/lib/example.pdf --dry-run
+bob highlights-ref sync ~/bob/lib/example.pdf --write-pdf
 ```
 
-Start with dry runs and enable writes only after reviewing the generated output.
+Keep Highlights and Obsidian idle while testing PDF marker writes so the apps do
+not race the CLI.
+
+## Scheduled Scan
+
+The MVP automation target is a scheduled `scan`, not a live recursive watcher.
+Start with a dry-run schedule. On the MacBook account, create this LaunchAgent:
+
+```bash
+mkdir -p ~/Library/LaunchAgents ~/Library/Logs/bob
+cat > ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bryan.bob-highlights-ref-scan</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>/Users/bryan/.cargo/bin/bob highlights-ref scan --dry-run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BOB_DIR</key>
+    <string>/Users/bryan/bob</string>
+    <key>BOB_HIGHLIGHTS_LIB_DIR</key>
+    <string>lib</string>
+    <key>BOB_HIGHLIGHTS_REF_DIR</key>
+    <string>ref</string>
+    <key>BOB_HIGHLIGHTS_DEFAULT_PARENT</key>
+    <string>[[obsidian]]</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/bryan/Library/Logs/bob/highlights-ref-scan.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bryan/Library/Logs/bob/highlights-ref-scan.err</string>
+</dict>
+</plist>
+PLIST
+plutil -lint ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist
+launchctl kickstart -k gui/$(id -u)/com.bryan.bob-highlights-ref-scan
+tail -n 80 ~/Library/Logs/bob/highlights-ref-scan.out
+tail -n 80 ~/Library/Logs/bob/highlights-ref-scan.err
+```
+
+After several clean dry-run cycles, remove `--dry-run` from the
+`ProgramArguments` command and reload the LaunchAgent with the same
+`launchctl bootout`, `bootstrap`, and `kickstart` commands. Keep PDF marker
+write-back manual; do not schedule `sync --write-pdf`.
+
+A cron fallback is also acceptable:
+
+```cron
+SHELL=/bin/zsh
+PATH=/Users/bryan/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin
+BOB_DIR=/Users/bryan/bob
+BOB_HIGHLIGHTS_LIB_DIR=lib
+BOB_HIGHLIGHTS_REF_DIR=ref
+BOB_HIGHLIGHTS_DEFAULT_PARENT=[[obsidian]]
+0 * * * * /Users/bryan/.cargo/bin/bob highlights-ref scan --dry-run >> /Users/bryan/Library/Logs/bob/highlights-ref-scan.log 2>&1
+```
+
+Disable the LaunchAgent with:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist
+```
+
+## Disable One PDF
+
+The MVP has no marker key such as `sync: false`. `scan` processes every `.pdf`
+under the configured library directory.
+
+To disable one PDF, move that PDF and its sidecar out of `~/bob/lib`:
+
+```bash
+mkdir -p ~/bob/lib-disabled
+mv ~/bob/lib/example.pdf ~/bob/lib-disabled/
+mv ~/bob/lib/example.md ~/bob/lib-disabled/ 2>/dev/null || true
+mv ~/bob/lib/example.textbundle ~/bob/lib-disabled/ 2>/dev/null || true
+git -C ~/bob status --short
+```
+
+The existing `~/bob/ref/example.md` is no longer touched once the PDF is outside
+the scanned library. Leave it in place for archival use, or move it explicitly:
+
+```bash
+mkdir -p ~/bob/ref-disabled
+mv ~/bob/ref/example.md ~/bob/ref-disabled/
+```
+
+Do not remove the managed Highlights markers as a disable mechanism. If a PDF is
+still scanned and its existing reference note lacks the managed markers, the
+command fails before guessing where generated content belongs.
+
+## Backup and Rollback
+
+Before first writes, make the vault clean or intentionally checkpointed:
+
+```bash
+git -C ~/bob status --short
+git -C ~/bob stash push -u -m "pre-highlights-ref"
+git -C ~/bob status --short
+```
+
+If the current vault changes should be kept as the baseline, commit them instead
+of stashing:
+
+```bash
+git -C ~/bob add ref lib
+git -C ~/bob commit -m "Checkpoint before highlights-ref sync"
+```
+
+Before enabling `--write-pdf`, keep a PDF backup outside the write path:
+
+```bash
+backup_dir=~/bob/backups/highlights-ref/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$backup_dir/lib"
+cp -p ~/bob/lib/example.pdf "$backup_dir/lib/"
+cp -p ~/bob/lib/example.md "$backup_dir/lib/" 2>/dev/null || true
+```
+
+For a full library backup before broader testing:
+
+```bash
+backup_dir=~/bob/backups/highlights-ref/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$backup_dir"
+rsync -a --include='*/' --include='*.pdf' --include='*.md' --include='*.textbundle/***' --exclude='*' ~/bob/lib/ "$backup_dir/lib/"
+```
+
+Inspect note writes:
+
+```bash
+git -C ~/bob diff -- ref/example.md
+git -C ~/bob status --short
+```
+
+Rollback a generated reference note:
+
+```bash
+git -C ~/bob restore -- ref/example.md
+```
+
+Rollback a PDF marker write from the backup:
+
+```bash
+cp -p "$backup_dir/lib/example.pdf" ~/bob/lib/example.pdf
+```
+
+## Conflict Resolution
+
+When the marker and frontmatter both changed since the last synced projection,
+the command fails with a conflict and writes nothing. Inspect both sides:
+
+```bash
+bob highlights-ref marker ~/bob/lib/example.pdf
+sed -n '1,120p' ~/bob/ref/example.md
+bob highlights-ref sync ~/bob/lib/example.pdf --dry-run
+```
+
+Choose the PDF marker as the source of truth:
+
+```bash
+bob highlights-ref sync ~/bob/lib/example.pdf --prefer marker
+```
+
+Choose the Obsidian frontmatter as the source of truth and write it back to the
+PDF marker:
+
+```bash
+bob highlights-ref sync ~/bob/lib/example.pdf --prefer frontmatter --write-pdf
+```
+
+If the only change is frontmatter and the command says `--write-pdf` is missing,
+review the marker first, back up the PDF, then run:
+
+```bash
+bob highlights-ref sync ~/bob/lib/example.pdf --write-pdf
+```
+
+## Expected Failures
+
+Common failure snippets and fixes:
+
+| Message snippet | Meaning | Fix |
+| --- | --- | --- |
+| `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
+| `no standalone /Text note annotations found` | The PDF has no standalone marker note. | Add the first standalone PDF note in Highlights. |
+| `missing required marker key: status` | The marker list lacks `status`. | Add `- status: reading` to the marker. |
+| `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |
+| `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |
+| `output path collision(s) detected before writes` | Multiple PDFs would write the same `ref/<basename>.md`. | Rename or move one PDF before scanning. |
+| `refusing to modify dirty vault files` | Git reports dirty files the command would touch. | Commit, stash, or clean those paths. |
+| `frontmatter changed but --write-pdf was not supplied` | Frontmatter is the selected source, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
+| `marker/frontmatter conflict` | Marker and frontmatter changed differently. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
+| `existing reference note is missing the managed Highlights region` | An existing ref note lacks `<!-- highlights:begin -->` and `<!-- highlights:end -->`. | Add both markers around the generated section or move the note aside and regenerate. |
+| `unsupported textbundle sidecar` | The `.textbundle` has no `text.md` or `text.markdown`. | Switch Highlights to Markdown sidecars or add one of those files. |
