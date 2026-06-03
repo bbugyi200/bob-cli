@@ -101,10 +101,10 @@ changes, stages only the files it touches, commits with a
 uncommitted.
 
 ```bash
-bob highlights-ref scan [--dry-run]
-bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontmatter]
 bob highlights-ref doctor
 bob highlights-ref marker <pdf>
+bob highlights-ref scan [--dry-run]
+bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontmatter]
 ```
 
 Prepares the Highlights app PDF annotation to Bob reference note sync workflow.
@@ -119,8 +119,9 @@ supplied. `--dry-run` reports the planned note/PDF actions without writing
 either side. `marker <pdf>` inspects and renders the marker contract without
 writing. `scan` recursively processes PDFs under the configured library with
 collision and dirty-target preflights, while `doctor` checks vault paths,
-sidecars, marker readability, Git state, default parent configuration, and
-optional `ob` availability without writing files.
+sidecars, marker readability, Git state, and optional `ob` availability without
+writing files. Marker notes must include `status` and `parent`; generated
+reference notes always include `type: "[[ref]]"`.
 
 For `foo.pdf`, `sync` discovers `foo.md` first and can parse simple
 `foo.textbundle/text.md` or `text.markdown` sidecars. Highlights, highlight
@@ -204,10 +205,6 @@ configured.
 
 `BOB_HIGHLIGHTS_REF_DIR` sets the generated reference note directory used by
 `bob highlights-ref`. It defaults to `ref` under `BOB_DIR`.
-
-`BOB_HIGHLIGHTS_DEFAULT_PARENT` sets the fallback `parent` frontmatter value for
-new reference notes when the PDF marker note omits `parent`. It defaults to
-`[[obsidian]]`.
 
 `DATE` preserves the legacy date override behavior. It can be a date command
 prefix such as `date --utc`, or a timestamp in the same formats accepted by

@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 05:17:57
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_contract_1.md
 ---
 # Plan: Tighten `bob highlights-ref` Reference Metadata Contract

@@ -25,13 +25,15 @@ use super::{env as bob_env, ob};
 const COMMAND_NAME: &str = "bob highlights-ref";
 const DEFAULT_LIB_DIR: &str = "lib";
 const DEFAULT_REF_DIR: &str = "ref";
-const DEFAULT_PARENT: &str = "[[obsidian]]";
 
 const ENV_LIB_DIR: &str = "BOB_HIGHLIGHTS_LIB_DIR";
 const ENV_REF_DIR: &str = "BOB_HIGHLIGHTS_REF_DIR";
-const ENV_DEFAULT_PARENT: &str = "BOB_HIGHLIGHTS_DEFAULT_PARENT";
 
-const MARKER_REQUIRED_KEY: &str = "status";
+const FIELD_STATUS: &str = "status";
+const FIELD_PARENT: &str = "parent";
+const FIELD_NOTE_TYPE: &str = "type";
+const NOTE_TYPE_VALUE: &str = "[[ref]]";
+const MARKER_REQUIRED_KEYS: &[&str] = &[FIELD_STATUS, FIELD_PARENT];
 const MANAGED_BODY_BEGIN: &str = "<!-- highlights:begin -->";
 const MANAGED_BODY_END: &str = "<!-- highlights:end -->";
 const PIPELINE_VERSION: &str = "highlights-ref-mvp-3";
@@ -59,7 +61,7 @@ const PIPELINE_FIELDS: &[&str] = &[
 ];
 
 const COMMON_USER_FIELDS: &[&str] = &[
-    "parent",
+    FIELD_PARENT,
     "title",
     "aliases",
     "topics",
@@ -73,7 +75,6 @@ struct Config {
     bob_dir: PathBuf,
     lib_dir: PathBuf,
     ref_dir: PathBuf,
-    default_parent: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,12 +371,11 @@ fn plan_pdf_sync(
     options: SyncOptions,
 ) -> Result<PdfSyncPlan> {
     let marker = read_pdf_marker(pdf)?;
-    let marker_projection =
-        projection_with_default_parent(parse_marker(&marker.contents)?, config);
+    let marker_projection = parse_marker(&marker.contents)?;
     let note_path = ref_note_path(config, pdf)?;
     validate_note_target(&note_path)?;
     let note = read_note(&note_path)?;
-    let frontmatter_projection = note.synced_projection(config);
+    let frontmatter_projection = note.synced_projection();
     let marker_hash = projection_hash(&marker_projection)?;
     let frontmatter_hash = projection_hash(&frontmatter_projection)?;
     let last_hash = note.marker_hash();
@@ -390,7 +390,10 @@ fn plan_pdf_sync(
     let synced_projection = match decision.source {
         SyncSource::Marker => marker_projection.clone(),
         SyncSource::Frontmatter => {
-            validate_required_status(&frontmatter_projection, "frontmatter")?;
+            validate_required_marker_keys(
+                &frontmatter_projection,
+                "frontmatter",
+            )?;
             frontmatter_projection.clone()
         }
     };
@@ -642,8 +645,7 @@ fn print_scan_write_summary(reports: &[SyncWriteReport]) {
 
 fn show_marker(config: &Config, pdf: &Path) -> Result<()> {
     let marker = read_pdf_marker(pdf)?;
-    let projection =
-        projection_with_default_parent(parse_marker(&marker.contents)?, config);
+    let projection = parse_marker(&marker.contents)?;
     print_config_report("marker", config);
     println!("pdf: {}", pdf.display());
     println!("marker_page: {}", marker.page_number);
@@ -685,19 +687,6 @@ fn doctor_vault(config: &Config) -> Result<()> {
         failures.push(format!(
             "reference directory does not exist or is not a directory: {}",
             config.ref_dir.display()
-        ));
-    }
-
-    if config.default_parent.trim().is_empty() {
-        println!("default_parent_check: fail (empty)");
-        failures.push("default parent is empty".to_string());
-    } else if is_wikilink(&config.default_parent) {
-        println!("default_parent_check: ok");
-    } else {
-        println!("default_parent_check: warn (not an Obsidian wikilink)");
-        warnings.push(format!(
-            "default parent is not an Obsidian wikilink: {}",
-            config.default_parent
         ));
     }
 
@@ -1491,7 +1480,6 @@ fn print_config_report(operation: &str, config: &Config) {
     println!("bob_dir: {}", config.bob_dir.display());
     println!("lib_dir: {}", config.lib_dir.display());
     println!("ref_dir: {}", config.ref_dir.display());
-    println!("default_parent: {}", config.default_parent);
     println!("managed_body_begin: {MANAGED_BODY_BEGIN}");
     println!("managed_body_end: {MANAGED_BODY_END}");
     println!(
@@ -1505,6 +1493,27 @@ fn build_cli() -> ClapCommand {
         .about("Sync Highlights PDF annotations into Bob reference notes")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .subcommand(
+            with_config_args(
+                ClapCommand::new("doctor")
+                    .about("Check Highlights reference sync prerequisites"),
+            )
+            .after_help("Checks vault paths, sidecars, PDF markers, Git state, and optional ob support."),
+        )
+        .subcommand(
+            with_config_args(
+                ClapCommand::new("marker")
+                    .about("Inspect the marker note for one PDF")
+                    .arg(
+                        Arg::new("pdf")
+                            .value_name("PDF")
+                            .required(true)
+                            .value_parser(OsStringValueParser::new())
+                            .help("PDF whose marker note should be inspected"),
+                    ),
+            )
+            .after_help("The marker note is the first standalone PDF note annotation."),
+        )
         .subcommand(
             with_config_args(
                 ClapCommand::new("scan")
@@ -1526,41 +1535,20 @@ fn build_cli() -> ClapCommand {
                     )
                     .arg(dry_run_arg())
                     .arg(
-                        Arg::new("write-pdf")
-                            .long("write-pdf")
-                            .action(ArgAction::SetTrue)
-                            .help("Allow marker writes back to the PDF"),
-                    )
-                    .arg(
                         Arg::new("prefer")
                             .long("prefer")
                             .value_name("SIDE")
                             .value_parser(["marker", "frontmatter"])
                             .help("Resolve a marker/frontmatter conflict using this side"),
+                    )
+                    .arg(
+                        Arg::new("write-pdf")
+                            .long("write-pdf")
+                            .action(ArgAction::SetTrue)
+                            .help("Allow marker writes back to the PDF"),
                     ),
             )
             .after_help("The first standalone /Text annotation in the PDF is treated as the marker note."),
-        )
-        .subcommand(
-            with_config_args(
-                ClapCommand::new("doctor")
-                    .about("Check Highlights reference sync prerequisites"),
-            )
-            .after_help("Checks vault paths, sidecars, PDF markers, Git state, default parent, and optional ob support."),
-        )
-        .subcommand(
-            with_config_args(
-                ClapCommand::new("marker")
-                    .about("Inspect the marker note for one PDF")
-                    .arg(
-                        Arg::new("pdf")
-                            .value_name("PDF")
-                            .required(true)
-                            .value_parser(OsStringValueParser::new())
-                            .help("PDF whose marker note should be inspected"),
-                    ),
-            )
-            .after_help("The marker note is the first standalone PDF note annotation."),
         )
 }
 
@@ -1586,13 +1574,6 @@ fn with_config_args(command: ClapCommand) -> ClapCommand {
                 .value_name("PATH")
                 .value_parser(OsStringValueParser::new())
                 .help("Reference note output directory; defaults to BOB_HIGHLIGHTS_REF_DIR or ref"),
-        )
-        .arg(
-            Arg::new("default-parent")
-                .long("default-parent")
-                .value_name("WIKILINK")
-                .value_parser(OsStringValueParser::new())
-                .help("Parent frontmatter fallback; defaults to BOB_HIGHLIGHTS_DEFAULT_PARENT or [[obsidian]]"),
         )
 }
 
@@ -1624,18 +1605,10 @@ impl Config {
             DEFAULT_REF_DIR,
             &bob_dir,
         );
-        let default_parent = configured_string(
-            matches,
-            "default-parent",
-            ENV_DEFAULT_PARENT,
-            DEFAULT_PARENT,
-        );
-
         Self {
             bob_dir,
             lib_dir,
             ref_dir,
-            default_parent,
         }
     }
 }
@@ -1700,7 +1673,7 @@ impl MarkerValue {
         }
     }
 
-    fn is_empty_status(&self) -> bool {
+    fn is_empty_required_value(&self) -> bool {
         match self {
             MarkerValue::Null => true,
             MarkerValue::String(value) => value.trim().is_empty(),
@@ -1767,7 +1740,7 @@ impl ParsedNote {
         })
     }
 
-    fn synced_projection(&self, config: &Config) -> Projection {
+    fn synced_projection(&self) -> Projection {
         let marker_fields = self.marker_fields();
         let mut projection = Projection::new();
 
@@ -1775,7 +1748,7 @@ impl ParsedNote {
             let Some(key) = &entry.key else {
                 continue;
             };
-            if is_pipeline_field(key) {
+            if is_managed_frontmatter_field(key) {
                 continue;
             }
             if (is_standard_user_field(key) || marker_fields.contains(key))
@@ -1785,9 +1758,6 @@ impl ParsedNote {
             }
         }
 
-        projection.entry("parent".to_string()).or_insert_with(|| {
-            MarkerValue::String(config.default_parent.clone())
-        });
         projection
     }
 
@@ -1802,21 +1772,30 @@ impl ParsedNote {
         let mut removed_keys = BTreeSet::new();
         removed_keys
             .extend(PIPELINE_FIELDS.iter().map(|field| (*field).to_string()));
+        removed_keys.insert(FIELD_NOTE_TYPE.to_string());
         removed_keys.extend(
             COMMON_USER_FIELDS
                 .iter()
-                .chain(iter::once(&MARKER_REQUIRED_KEY))
+                .chain(MARKER_REQUIRED_KEYS.iter())
                 .map(|field| (*field).to_string()),
         );
         removed_keys.extend(old_marker_fields);
         removed_keys.extend(projection.keys().cloned());
 
         let mut lines = Vec::new();
+        let mut rendered_note_type = false;
         for key in ordered_projection_keys(projection) {
             let Some(value) = projection.get(&key) else {
                 continue;
             };
             lines.push(format!("{key}: {}", value.as_frontmatter_value()));
+            if key == FIELD_PARENT {
+                lines.push(note_type_frontmatter_line());
+                rendered_note_type = true;
+            }
+        }
+        if !rendered_note_type {
+            lines.push(note_type_frontmatter_line());
         }
 
         for entry in &self.frontmatter {
@@ -2001,6 +1980,13 @@ fn default_note_body(
     body
 }
 
+fn note_type_frontmatter_line() -> String {
+    format!(
+        "{FIELD_NOTE_TYPE}: {}",
+        MarkerValue::String(NOTE_TYPE_VALUE.to_string()).as_frontmatter_value()
+    )
+}
+
 fn note_title(pdf: &Path, projection: &Projection) -> String {
     projection
         .get("title")
@@ -2109,20 +2095,6 @@ fn configured_path(
     resolve_under_bob(bob_dir, &configured)
 }
 
-fn configured_string(
-    matches: &ArgMatches,
-    arg_name: &str,
-    env_name: &str,
-    default_value: &str,
-) -> String {
-    matches
-        .get_one::<OsString>(arg_name)
-        .filter(|value| !value.is_empty())
-        .map(|value| os_to_string(value.as_os_str()))
-        .or_else(|| env::var(env_name).ok().filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| default_value.to_string())
-}
-
 fn resolve_under_bob(bob_dir: &Path, path: &Path) -> PathBuf {
     let expanded = bob_env::expand_tilde(path);
     if expanded.is_absolute() {
@@ -2137,10 +2109,6 @@ fn required_path(matches: &ArgMatches, name: &str) -> PathBuf {
         .get_one::<OsString>(name)
         .expect("required argument is enforced by clap");
     bob_env::expand_tilde(&PathBuf::from(value))
-}
-
-fn os_to_string(value: &OsStr) -> String {
-    value.to_string_lossy().into_owned()
 }
 
 fn prefer_from_matches(matches: &ArgMatches) -> Option<Prefer> {
@@ -2310,6 +2278,11 @@ fn parse_marker(contents: &str) -> Result<Projection> {
                 "invalid marker item on line {line_number}: '{key}' is pipeline-owned and cannot be synced from the marker"
             )));
         }
+        if is_command_managed_field(&key) {
+            return Err(CommandError::new(format!(
+                "invalid marker item on line {line_number}: '{key}' is command-managed and cannot be synced from the marker"
+            )));
+        }
         if projection.contains_key(&key) {
             return Err(CommandError::new(format!(
                 "duplicate marker key on line {line_number}: {key}"
@@ -2318,33 +2291,25 @@ fn parse_marker(contents: &str) -> Result<Projection> {
         projection.insert(key, parse_value(value));
     }
 
-    validate_required_status(&projection, "marker")?;
+    validate_required_marker_keys(&projection, "marker")?;
     Ok(projection)
 }
 
-fn projection_with_default_parent(
-    mut projection: Projection,
-    config: &Config,
-) -> Projection {
-    projection
-        .entry("parent".to_string())
-        .or_insert_with(|| MarkerValue::String(config.default_parent.clone()));
-    projection
-}
-
-fn validate_required_status(
+fn validate_required_marker_keys(
     projection: &Projection,
     source: &str,
 ) -> Result<()> {
-    let Some(status) = projection.get(MARKER_REQUIRED_KEY) else {
-        return Err(CommandError::new(format!(
-            "missing required marker key: {MARKER_REQUIRED_KEY}"
-        )));
-    };
-    if status.is_empty_status() {
-        return Err(CommandError::new(format!(
-            "{source} has an empty required marker key: {MARKER_REQUIRED_KEY}"
-        )));
+    for key in MARKER_REQUIRED_KEYS {
+        let Some(value) = projection.get(*key) else {
+            return Err(CommandError::new(format!(
+                "missing required marker key: {key}"
+            )));
+        };
+        if value.is_empty_required_value() {
+            return Err(CommandError::new(format!(
+                "{source} has an empty required marker key: {key}"
+            )));
+        }
     }
     Ok(())
 }
@@ -2366,16 +2331,20 @@ fn render_marker(projection: &Projection) -> String {
 
 fn ordered_projection_keys(projection: &Projection) -> Vec<String> {
     let mut keys = Vec::new();
-    if projection.contains_key(MARKER_REQUIRED_KEY) {
-        keys.push(MARKER_REQUIRED_KEY.to_string());
+    for key in MARKER_REQUIRED_KEYS {
+        if projection.contains_key(*key) {
+            keys.push((*key).to_string());
+        }
     }
     for field in COMMON_USER_FIELDS {
-        if projection.contains_key(*field) && *field != MARKER_REQUIRED_KEY {
+        if projection.contains_key(*field)
+            && !MARKER_REQUIRED_KEYS.contains(field)
+        {
             keys.push((*field).to_string());
         }
     }
     for key in projection.keys() {
-        if key != MARKER_REQUIRED_KEY
+        if !MARKER_REQUIRED_KEYS.contains(&key.as_str())
             && !COMMON_USER_FIELDS.contains(&key.as_str())
         {
             keys.push(key.clone());
@@ -2615,8 +2584,16 @@ fn is_pipeline_field(key: &str) -> bool {
     PIPELINE_FIELDS.contains(&key)
 }
 
+fn is_command_managed_field(key: &str) -> bool {
+    key == FIELD_NOTE_TYPE
+}
+
+fn is_managed_frontmatter_field(key: &str) -> bool {
+    is_pipeline_field(key) || is_command_managed_field(key)
+}
+
 fn is_standard_user_field(key: &str) -> bool {
-    key == MARKER_REQUIRED_KEY || COMMON_USER_FIELDS.contains(&key)
+    MARKER_REQUIRED_KEYS.contains(&key) || COMMON_USER_FIELDS.contains(&key)
 }
 
 fn unknown_synced_fields(projection: &Projection) -> Vec<String> {
@@ -2787,13 +2764,15 @@ mod tests {
         assert!(super::PIPELINE_FIELDS.contains(&"highlights_marker_hash"));
         assert!(!super::PIPELINE_FIELDS.contains(&"status"));
         assert!(!super::PIPELINE_FIELDS.contains(&"parent"));
+        assert!(!super::PIPELINE_FIELDS.contains(&"type"));
+        assert!(super::is_command_managed_field("type"));
     }
 
     #[test]
     fn marker_parser_accepts_yaml_subset_and_normalizes_keys() {
         let projection = parse_marker(
             "\
-- Status: reading
+- Status: wip
 * aliases: [\"Systems Performance\", linux]
 - source-url: https://example.com/book
 - parent: [[obsidian]]
@@ -2805,7 +2784,7 @@ mod tests {
 
         assert_eq!(
             projection.get("status"),
-            Some(&MarkerValue::String("reading".to_string()))
+            Some(&MarkerValue::String("wip".to_string()))
         );
         assert_eq!(
             projection.get("source_url"),
@@ -2823,15 +2802,29 @@ mod tests {
     }
 
     #[test]
-    fn marker_parser_rejects_missing_and_duplicate_status() {
+    fn marker_parser_rejects_missing_required_keys_type_and_duplicate_status() {
         let missing = parse_marker("- title: Missing\n")
             .expect_err("missing status should fail");
         assert!(missing
             .to_string()
             .contains("missing required marker key: status"));
 
-        let duplicate = parse_marker("- status: reading\n- Status: done\n")
-            .expect_err("duplicate status should fail");
+        let missing_parent = parse_marker("- status: wip\n")
+            .expect_err("missing parent should fail");
+        assert!(missing_parent
+            .to_string()
+            .contains("missing required marker key: parent"));
+
+        let marker_type = parse_marker(
+            "- status: wip\n- parent: [[obsidian]]\n- type: [[book]]\n",
+        )
+        .expect_err("marker type should fail");
+        assert!(marker_type.to_string().contains("command-managed"));
+
+        let duplicate = parse_marker(
+            "- status: wip\n- parent: [[obsidian]]\n- Status: done\n",
+        )
+        .expect_err("duplicate status should fail");
         assert!(duplicate.to_string().contains("duplicate marker key"));
     }
 
@@ -2844,7 +2837,7 @@ mod tests {
         );
         projection.insert(
             "status".to_string(),
-            MarkerValue::String("reading".to_string()),
+            MarkerValue::String("wip".to_string()),
         );
         projection.insert(
             "title".to_string(),
@@ -2858,7 +2851,7 @@ mod tests {
         assert_eq!(
             render_marker(&projection),
             "\
-- status: reading
+- status: wip
 - parent: [[obsidian]]
 - title: \"Systems Performance\"
 - z_custom: last
@@ -2867,12 +2860,13 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_projection_uses_marker_fields_and_default_parent() {
+    fn frontmatter_projection_uses_marker_fields_without_fallback_parent() {
         let note = parse_note(
             "\
 ---
-status: reading
+status: wip
 title: Existing
+type: \"[[old-type]]\"
 custom_flag: true
 highlights_marker_fields: [custom_flag]
 source_pdf: lib/example.pdf
@@ -2881,18 +2875,10 @@ source_pdf: lib/example.pdf
 Body
 ",
         );
-        let config = super::Config {
-            bob_dir: PathBuf::from("/tmp/bob"),
-            lib_dir: PathBuf::from("/tmp/bob/lib"),
-            ref_dir: PathBuf::from("/tmp/bob/ref"),
-            default_parent: "[[obsidian]]".to_string(),
-        };
 
-        let projection = note.synced_projection(&config);
-        assert_eq!(
-            projection.get("parent"),
-            Some(&MarkerValue::String("[[obsidian]]".to_string()))
-        );
+        let projection = note.synced_projection();
+        assert!(!projection.contains_key("parent"));
+        assert!(!projection.contains_key("type"));
         assert_eq!(
             projection.get("custom_flag"),
             Some(&MarkerValue::Bool(true))
@@ -2906,6 +2892,7 @@ Body
             "\
 ---
 status: old
+type: \"[[old-type]]\"
 owner: Bryan
 ---
 
@@ -2915,7 +2902,7 @@ Manual body.
         let mut projection = Projection::new();
         projection.insert(
             "status".to_string(),
-            MarkerValue::String("reading".to_string()),
+            MarkerValue::String("wip".to_string()),
         );
         projection.insert(
             "parent".to_string(),
@@ -2935,7 +2922,9 @@ Manual body.
             &note.body,
         );
 
-        assert!(rendered.contains("status: reading\n"));
+        assert!(rendered.contains("status: wip\n"));
+        assert!(rendered.contains("type: \"[[ref]]\"\n"));
+        assert!(!rendered.contains("type: \"[[old-type]]\"\n"));
         assert!(rendered.contains("owner: Bryan\n"));
         assert!(rendered.contains("source_pdf: lib/example.pdf\n"));
         assert!(rendered.ends_with("\nManual body.\n"));

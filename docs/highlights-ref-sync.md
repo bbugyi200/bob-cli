@@ -24,16 +24,16 @@ path order. It refuses duplicate output paths such as two PDFs with the same
 basename that would both write `ref/<basename>.md`.
 
 `doctor` checks vault paths, library/ref directories, sidecar presence, marker
-readability, default parent shape, Git worktree status, and optional `ob`
-availability. It never writes files.
+readability, Git worktree status, and optional `ob` availability. It never
+writes files.
 
 Available commands:
 
 ```bash
-bob highlights-ref scan [--dry-run]
-bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontmatter]
 bob highlights-ref doctor
 bob highlights-ref marker <pdf>
+bob highlights-ref scan [--dry-run]
+bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontmatter]
 ```
 
 `sync <pdf> --dry-run` prints the resolved configuration and planned note/PDF
@@ -96,7 +96,7 @@ not identified by a sentinel token.
 The marker note is an unordered list of `key: value` pairs:
 
 ```text
-- status: reading
+- status: wip
 - parent: [[obsidian]]
 - title: Systems Performance
 - aliases: ["Systems Performance", "Brendan Gregg systems performance"]
@@ -111,7 +111,7 @@ Allowed list markers:
 * key: value
 ```
 
-`status` is the only required marker key.
+`status` and `parent` are required marker keys.
 
 Values should be parsed as a YAML-compatible subset when possible:
 
@@ -122,25 +122,23 @@ Values should be parsed as a YAML-compatible subset when possible:
 - inline lists
 
 Invalid values fall back to strings when that is unambiguous. Duplicate marker
-keys, invalid marker list items, pipeline-owned marker keys, and a missing or
-empty `status` produce clear errors.
+keys, invalid marker list items, pipeline-owned marker keys, command-managed
+marker keys such as `type`, and missing or empty `status` or `parent` produce
+clear errors.
 
-## Parent Handling
+## Required Parent and Type
 
-New Markdown notes under `~/bob` require `parent` frontmatter. The marker note
-does not require `parent`.
+New Markdown notes under `~/bob` require `parent` frontmatter. The PDF marker
+is authoritative for `parent`, so the marker must include it.
 
-If the marker omits `parent`, the command uses:
+Generated reference notes also always include command-managed frontmatter:
 
-```text
-BOB_HIGHLIGHTS_DEFAULT_PARENT=[[obsidian]]
+```yaml
+type: "[[ref]]"
 ```
 
-Override precedence is:
-
-1. Command flag: `--default-parent '[[some note]]'`
-2. Environment: `BOB_HIGHLIGHTS_DEFAULT_PARENT`
-3. Built-in default: `[[obsidian]]`
+`type` is replaced on each successful sync, excluded from marker/frontmatter
+round-trip hashes, and rejected if it appears in the PDF marker note.
 
 ## Synced Properties
 
@@ -159,6 +157,9 @@ highlights_marker_hash
 highlights_marker_fields
 pipeline_version
 ```
+
+The command-managed `type` field is also excluded from marker sync and always
+rendered as `[[ref]]` in the reference note.
 
 Unknown marker keys should round-trip into frontmatter. New frontmatter keys
 should sync back to the marker only when they are standard supported fields or
@@ -313,13 +314,12 @@ In Highlights Pro on the MacBook:
   `---` annotation separators, highlights as blockquote lines, highlight
   comments as plain paragraphs, and standalone notes as plain paragraphs.
 - Add exactly one marker note as the first standalone PDF note annotation.
-- Put at least `- status: reading` in that first standalone note. `parent` is
-  optional because the command falls back to `[[obsidian]]`.
+- Put at least `status` and `parent` in that first standalone note.
 
 Use this marker as a starting point:
 
 ```text
-- status: reading
+- status: wip
 - parent: [[obsidian]]
 - title: Example Title
 - topics: [example]
@@ -346,8 +346,8 @@ MacBook validation checklist:
 - `bob highlights-ref sync ~/bob/lib/example.pdf --dry-run` shows the expected
   marker page/note, sync source, sidecar path, note action, and no writes.
 - The first real note write creates or updates `~/bob/ref/example.md` with
-  `parent`, pipeline metadata, manual sections, and the managed Highlights
-  region.
+  `parent`, `type: "[[ref]]"`, pipeline metadata, manual sections, and the
+  managed Highlights region.
 - A second run with unchanged inputs reports `writes: none`.
 - If frontmatter-only edits require PDF marker write-back, a targeted dry run
   reports `pdf_marker_action: would-update` before any `--write-pdf` run.
@@ -410,8 +410,6 @@ cat > ~/Library/LaunchAgents/com.bryan.bob-highlights-ref-scan.plist <<'PLIST'
     <string>lib</string>
     <key>BOB_HIGHLIGHTS_REF_DIR</key>
     <string>ref</string>
-    <key>BOB_HIGHLIGHTS_DEFAULT_PARENT</key>
-    <string>[[obsidian]]</string>
   </dict>
   <key>StartInterval</key>
   <integer>3600</integer>
@@ -443,7 +441,6 @@ PATH=/Users/bryan/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin
 BOB_DIR=/Users/bryan/bob
 BOB_HIGHLIGHTS_LIB_DIR=lib
 BOB_HIGHLIGHTS_REF_DIR=ref
-BOB_HIGHLIGHTS_DEFAULT_PARENT=[[obsidian]]
 0 * * * * /Users/bryan/.cargo/bin/bob highlights-ref scan --dry-run >> /Users/bryan/Library/Logs/bob/highlights-ref-scan.log 2>&1
 ```
 
@@ -573,7 +570,9 @@ Common failure snippets and fixes:
 | --- | --- | --- |
 | `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
 | `no standalone /Text note annotations found` | The PDF has no standalone marker note. | Add the first standalone PDF note in Highlights. |
-| `missing required marker key: status` | The marker list lacks `status`. | Add `- status: reading` to the marker. |
+| `missing required marker key: status` | The marker list lacks `status`. | Add `- status: wip` to the marker. |
+| `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add `- parent: [[...]]` to the marker or frontmatter source. |
+| `'type' is command-managed` | The marker tries to set the generated note `type`. | Remove `type` from the marker; generated notes get `type: "[[ref]]"` automatically. |
 | `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |
 | `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |
 | `output path collision(s) detected before writes` | Multiple PDFs would write the same `ref/<basename>.md`. | Rename or move one PDF before scanning. |
