@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-04 18:04:09
-status: wip
+status: done
 prompt: sdd/prompts/202606/hammerspoon_capture_created_property.md
 ---
 # Hammerspoon Capture Created Property Plan
