@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 22:52:57
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_backslash_daily_fallback.md
 ---
 # Obsidian `\\` Daily Fallback Plan
