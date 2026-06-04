@@ -1390,6 +1390,10 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
         "{contents}"
     );
     assert!(
+        contents.contains("PDF: [[lib/systems-performance.pdf]] ^pdf\n"),
+        "{contents}"
+    );
+    assert!(
         !contents.contains("ref_type:"),
         "top-level library PDFs should not derive ref_type:\n{contents}"
     );
@@ -2545,7 +2549,7 @@ Note: Keep a standalone observation after the marker.
     assert!(contents.contains("highlights_synced_at: "), "{contents}");
     assert!(contents.contains("# Systems Performance\n"), "{contents}");
     assert!(
-        contents.contains("PDF: [[lib/books/systems-performance.pdf]]\n"),
+        contents.contains("PDF: [[lib/books/systems-performance.pdf]] ^pdf\n"),
         "{contents}"
     );
     assert!(

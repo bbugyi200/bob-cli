@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-03 20:40:49
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_ref_pdf_block_id.md
 ---
 # Plan: Add `^pdf` Block ID to Generated `bob highlights-ref` PDF Lines
