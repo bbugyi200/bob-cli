@@ -41,7 +41,7 @@ bob highlights-ref sync <pdf> [--dry-run] [--write-pdf] [--prefer marker|frontma
 `sync <pdf> --dry-run` prints the resolved configuration and planned note/PDF
 actions without modifying either side. Without `--dry-run`, the command writes
 the reference note when frontmatter changes. It only writes the PDF marker when
-frontmatter is the selected source and `--write-pdf` is supplied.
+the selected projection needs marker write-back and `--write-pdf` is supplied.
 
 ## Release Handoff Summary
 
@@ -222,6 +222,8 @@ Implemented conflict policy:
 - If only the marker changed, update frontmatter.
 - If only frontmatter changed, update the PDF marker note when PDF writes are
   enabled.
+- If the generated PDF task line is checked, treat that as a note-side
+  `status: done` signal.
 - If marker and frontmatter changed different fields from the stored base,
   auto-merge them. PDF marker writes are still opt-in with `--write-pdf`.
 - If both changed the same field differently, fail without modifying either side unless
@@ -230,8 +232,9 @@ Implemented conflict policy:
 The last synced user-property projection is stored as `highlights_marker_hash`
 and as compact JSON in `highlights_marker_base`. The hash keeps old-note
 compatibility; the base snapshot lets the command prove safe field-level
-merges. `--prefer frontmatter` and any auto-merge that includes frontmatter
-changes require `--write-pdf` whenever the PDF marker must be updated.
+merges. `--prefer frontmatter`, checked-task completion, and any auto-merge
+that includes frontmatter changes require `--write-pdf` whenever the PDF marker
+must be updated.
 
 PDF marker writes are performed by saving a temporary PDF next to the original
 and renaming it over the target. Before first PDF writes, commit or otherwise
@@ -247,8 +250,10 @@ action. It does not create directories, write notes, or write PDFs.
 Before a writing scan, the command builds the complete plan for every PDF,
 rejects duplicate output paths, and checks Git status for existing vault files
 it would modify. If a target ref note or PDF marker target is dirty, it fails
-before any write. There is no force mode in the MVP; commit, stash, or clean the
-dirty file before rerunning.
+before any write, except for a tracked target ref note whose only body change is
+the exact generated `^task` checkbox toggle, optionally combined with
+frontmatter edits. There is no force mode in the MVP; commit, stash, or clean
+unrelated dirty files before rerunning.
 
 Reference note writes are atomic temporary-file renames and are skipped when the
 rendered note is byte-identical to the existing file.
@@ -337,8 +342,8 @@ Linked sidecar fragment:
 
 ##### 2026-06-03:
 
-> It only writes the PDF marker when frontmatter is the selected
-source and --write-pdf is supplied.
+> It only writes the PDF marker when marker write-back is needed
+and --write-pdf is supplied.
 
 - Support sase tool call replay?
 ```
@@ -358,6 +363,21 @@ New generated notes include a title, a PDF wikilink Obsidian task line with
 the stable `^task` block ID, and `## Highlights`.
 Existing notes must already contain the managed begin/end markers; otherwise
 `sync` fails instead of guessing where generated content belongs.
+
+The generated task line is a completion affordance:
+
+```md
+- [ ] #task [[lib/books/example.pdf]] ^task
+```
+
+Checking it with `[x]` or `[X]` means `status: done`. Unchecking it does not
+infer a replacement status. When the final synced status is `done`, `sync`
+checks the generated task line if it is present; existing notes without that
+exact generated line are not bulk-migrated. If the checked task would update
+the PDF marker, `sync --dry-run` previews `pdf_marker_action: would-update`,
+plain `sync` refuses before writes, and targeted `sync --write-pdf` writes the
+marker. `scan --dry-run` previews this work, while writing `scan` still refuses
+instead of writing PDFs.
 
 Generated blocks use Obsidian block IDs beginning with `^h-`. The MVP ID is a
 deterministic content hash over source PDF path, page label, annotation kind,
@@ -452,8 +472,9 @@ MacBook validation checklist:
   with `parent`, `type: "[[ref]]"`, `ref_type: books`, pipeline metadata,
   manual sections, and the managed Highlights region.
 - A second run with unchanged inputs reports `writes: none`.
-- If frontmatter-only edits require PDF marker write-back, a targeted dry run
-  reports `pdf_marker_action: would-update` before any `--write-pdf` run.
+- If frontmatter edits or a checked generated task require PDF marker
+  write-back, a targeted dry run reports `pdf_marker_action: would-update`
+  before any `--write-pdf` run.
 - `git -C ~/bob status --short` is reviewed before and after each write pass.
 
 The sync model is deliberately asymmetric:
@@ -490,9 +511,10 @@ bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
 ```
 
 If the ref note is tracked in Git, the write-back command may update that dirty
-note only when the dirty changes are unstaged frontmatter-only edits and the
-file still matches what the command planned from. Body edits, managed-region
-edits, staged changes, untracked notes, and dirty PDFs are still refused.
+note only when the dirty changes are unstaged frontmatter edits and/or the exact
+generated `^task` checkbox toggle, and the file still matches what the command
+planned from. Other body edits, managed-region edits, staged changes, untracked
+notes, and dirty PDFs are still refused.
 
 Keep Highlights and Obsidian idle while testing PDF marker writes so the apps do
 not race the CLI.
@@ -674,9 +696,9 @@ PDF marker:
 bob highlights-ref sync ~/bob/lib/books/example.pdf --prefer frontmatter --write-pdf
 ```
 
-If the only change is frontmatter and the command says `--write-pdf` is missing,
-or a dry-run auto-merge reports `pdf_marker_action: would-update`, review the
-marker first, back up the PDF, then run:
+If the only change is frontmatter, the generated task line is checked, or a
+dry-run auto-merge reports `pdf_marker_action: would-update`, review the marker
+first, back up the PDF, then run:
 
 ```bash
 bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
@@ -698,8 +720,9 @@ Common failure snippets and fixes:
 | `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |
 | `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |
 | `output path collision(s) detected before writes` | Multiple PDFs would write the same reference note path, such as `ref/books/example.md`. | Rename or move one PDF before scanning. |
-| `refusing to modify dirty vault files` | Git reports dirty touched paths outside the allowed frontmatter-only note write-back case. | Commit, stash, or clean those paths. |
-| `frontmatter changed but --write-pdf was not supplied` | Frontmatter contributes to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
+| `refusing to modify dirty vault files` | Git reports dirty touched paths outside the allowed frontmatter and generated-task checkbox write-back case. | Commit, stash, or clean those paths. |
+| `reference note changed but --write-pdf was not supplied` | Frontmatter or the generated checked task contributes to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
+| `checked PDF task conflicts` | The generated task says `status: done`, but marker or frontmatter changed `status` to another value from the stored base. | Uncheck the task or set the marker/frontmatter status to `done`. |
 | `marker/frontmatter conflict` | Marker and frontmatter changed the same field differently, or the note has no stored base snapshot for a safe merge. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
 | `changed during sync; rerun` | The note or PDF changed after planning and before writing. | Rerun after closing or pausing apps that may touch the file. |
 | `existing reference note is missing the managed Highlights region` | An existing ref note lacks `<!-- highlights:begin -->` and `<!-- highlights:end -->`. | Add both markers around the generated section or move the note aside and regenerate. |

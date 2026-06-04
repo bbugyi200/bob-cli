@@ -42,6 +42,8 @@ const MARKER_REQUIRED_KEYS: &[&str] = &[FIELD_STATUS, FIELD_PARENT];
 const COMMAND_MANAGED_FIELDS: &[&str] = &[FIELD_NOTE_TYPE, FIELD_REF_TYPE];
 const MANAGED_BODY_BEGIN: &str = "<!-- highlights:begin -->";
 const MANAGED_BODY_END: &str = "<!-- highlights:end -->";
+const PDF_TASK_BLOCK_ID: &str = "^task";
+const PDF_TASK_TAG: &str = "#task";
 const PIPELINE_VERSION: &str = "highlights-ref-mvp-3";
 const REMOVED_HIGHLIGHTS_HEADING: &str = "### Removed highlights";
 const TEXTBUNDLE_TEXT_FILES: &[&str] = &["text.md", "text.markdown"];
@@ -156,6 +158,27 @@ struct ParsedNote {
     original: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PdfTaskLine {
+    line_index: usize,
+    checkbox_mark_index: usize,
+    checked: bool,
+    mark: char,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfTaskLineState {
+    Missing,
+    Present(PdfTaskLine),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PdfTaskCompletion {
+    found: bool,
+    checked: bool,
+    status_contributed: bool,
+}
+
 #[derive(Debug, Clone)]
 struct PipelineMetadata {
     source_pdf: String,
@@ -267,6 +290,7 @@ struct PdfSyncPlan {
     rendered_body: String,
     stable_rendered_note: String,
     stable_note_action: &'static str,
+    pdf_task_completion: PdfTaskCompletion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,12 +543,13 @@ fn plan_pdf_sync(
     let note_path = ref_note_path(config, pdf)?;
     validate_note_target(&note_path)?;
     let note = read_note(&note_path)?;
+    let pdf_task_line = parse_pdf_task_line(&note.body)?;
     let frontmatter_projection = note.synced_projection()?;
     let marker_hash = projection_hash(&marker_projection)?;
     let frontmatter_hash = projection_hash(&frontmatter_projection)?;
     let last_hash = note.marker_hash();
     let base_projection = note.marker_base_projection()?;
-    let resolution = resolve_sync_projection(SyncInputs {
+    let mut resolution = resolve_sync_projection(SyncInputs {
         last_hash: last_hash.as_deref(),
         base_projection: base_projection.as_ref(),
         marker_projection: &marker_projection,
@@ -534,6 +559,13 @@ fn plan_pdf_sync(
         note_exists: note.exists(),
         prefer: options.prefer,
     })?;
+    let pdf_task_completion = apply_pdf_task_completion_signal(
+        &mut resolution,
+        &pdf_task_line,
+        base_projection.as_ref(),
+        &marker_projection,
+        &frontmatter_projection,
+    )?;
     let decision = resolution.decision;
     let synced_projection = resolution.projection;
     validate_required_marker_keys(
@@ -548,7 +580,7 @@ fn plan_pdf_sync(
 
     if marker_write_needed && !options.write_pdf && !options.dry_run {
         return Err(CommandError::new(
-            "frontmatter changed but --write-pdf was not supplied; refusing to update the PDF marker",
+            "reference note changed but --write-pdf was not supplied; refusing to update the PDF marker",
         ));
     }
 
@@ -604,6 +636,7 @@ fn plan_pdf_sync(
         rendered_body,
         stable_rendered_note,
         stable_note_action,
+        pdf_task_completion,
     })
 }
 
@@ -745,6 +778,13 @@ fn print_pdf_sync_report(
     println!("marker_note: {}", plan.marker.note_number);
     println!("sync_source: {}", plan.decision.source.as_str());
     println!("sync_reason: {}", plan.decision.reason);
+    println!(
+        "pdf_task: {}",
+        pdf_task_completion_label(plan.pdf_task_completion)
+    );
+    if plan.pdf_task_completion.status_contributed {
+        println!("pdf_task_contribution: status=done");
+    }
     if plan.decision.source == SyncSource::AutoMerge {
         println!(
             "sync_marker_contributed: {}",
@@ -775,6 +815,14 @@ fn write_summary(report: SyncWriteReport) -> &'static str {
     }
 }
 
+fn pdf_task_completion_label(completion: PdfTaskCompletion) -> &'static str {
+    match (completion.found, completion.checked) {
+        (false, _) => "missing",
+        (true, false) => "unchecked",
+        (true, true) => "checked",
+    }
+}
+
 fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     println!("pdf: {}", plan.pdf.display());
     println!("  note: {}", plan.note_path.display());
@@ -788,6 +836,13 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     println!("  sync_source: {}", plan.decision.source.as_str());
     if plan.decision.source == SyncSource::AutoMerge {
         println!("  sync_reason: {}", plan.decision.reason);
+    }
+    println!(
+        "  pdf_task: {}",
+        pdf_task_completion_label(plan.pdf_task_completion)
+    );
+    if plan.pdf_task_completion.status_contributed {
+        println!("  pdf_task_contribution: status=done");
     }
     println!("  note_action: {}", plan.stable_note_action);
     println!(
@@ -1179,7 +1234,7 @@ fn dirty_entry_allowed_for_plans(
     let Some(plan) = plans.iter().find(|plan| plan.note_path == path) else {
         return Ok(false);
     };
-    if !note_write_planned(plan) || !plan.decision.frontmatter_contributed {
+    if !note_write_planned(plan) {
         return Ok(false);
     }
     if path.strip_prefix(&config.ref_dir).is_err() {
@@ -1195,10 +1250,15 @@ fn dirty_entry_allowed_for_plans(
     let current_contents = fs::read_to_string(&path).map_err(|error| {
         CommandError::new(format!("read note {}: {error}", path.display()))
     })?;
-    Ok(changes_confined_to_frontmatter(
-        &head_contents,
-        &current_contents,
-    ))
+    let Some(change) =
+        dirty_note_allowed_change(&head_contents, &current_contents)
+    else {
+        return Ok(false);
+    };
+    if change.includes_frontmatter() && !plan.decision.frontmatter_contributed {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn git_head_contents(config: &Config, path: &Path) -> Result<Option<String>> {
@@ -1223,14 +1283,80 @@ fn git_head_contents(config: &Config, path: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn changes_confined_to_frontmatter(base: &str, current: &str) -> bool {
-    let Some((_, base_body)) = split_frontmatter(base) else {
-        return false;
+#[cfg(test)]
+fn changes_confined_to_frontmatter_or_pdf_task_checkbox(
+    base: &str,
+    current: &str,
+) -> bool {
+    dirty_note_allowed_change(base, current).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirtyNoteAllowedChange {
+    FrontmatterOnly,
+    PdfTaskCheckboxOnly,
+    FrontmatterAndPdfTaskCheckbox,
+}
+
+impl DirtyNoteAllowedChange {
+    fn includes_frontmatter(self) -> bool {
+        matches!(
+            self,
+            DirtyNoteAllowedChange::FrontmatterOnly
+                | DirtyNoteAllowedChange::FrontmatterAndPdfTaskCheckbox
+        )
+    }
+}
+
+fn dirty_note_allowed_change(
+    base: &str,
+    current: &str,
+) -> Option<DirtyNoteAllowedChange> {
+    let Some((base_frontmatter, base_body)) = split_frontmatter(base) else {
+        return None;
     };
-    let Some((_, current_body)) = split_frontmatter(current) else {
-        return false;
+    let Some((current_frontmatter, current_body)) = split_frontmatter(current)
+    else {
+        return None;
     };
-    base_body == current_body
+    let frontmatter_changed = base_frontmatter != current_frontmatter;
+    let task_checkbox_changed =
+        bodies_differ_only_by_pdf_task_checkbox(&base_body, &current_body);
+
+    match (
+        frontmatter_changed,
+        task_checkbox_changed,
+        base_body == current_body,
+    ) {
+        (true, false, true) => Some(DirtyNoteAllowedChange::FrontmatterOnly),
+        (false, true, false) => {
+            Some(DirtyNoteAllowedChange::PdfTaskCheckboxOnly)
+        }
+        (true, true, false) => {
+            Some(DirtyNoteAllowedChange::FrontmatterAndPdfTaskCheckbox)
+        }
+        _ => None,
+    }
+}
+
+fn bodies_differ_only_by_pdf_task_checkbox(
+    base_body: &str,
+    current_body: &str,
+) -> bool {
+    let base_task = match parse_pdf_task_line(base_body) {
+        Ok(PdfTaskLineState::Present(task_line)) => task_line,
+        _ => return false,
+    };
+    let current_task = match parse_pdf_task_line(current_body) {
+        Ok(PdfTaskLineState::Present(task_line)) => task_line,
+        _ => return false,
+    };
+    if base_task.checked == current_task.checked {
+        return false;
+    }
+
+    replace_pdf_task_checkbox_mark(base_body, current_task.mark)
+        .is_ok_and(|toggled| toggled == current_body)
 }
 
 fn git_status(config: &Config, paths: &[PathBuf]) -> Result<GitStatus> {
@@ -1906,6 +2032,220 @@ fn normalize_annotation_text(lines: &[String]) -> String {
 
 fn normalized_identity_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_pdf_task_line(body: &str) -> Result<PdfTaskLineState> {
+    let mut found = None;
+    let mut task_block_line_count = 0usize;
+
+    for (line_index, line) in body.lines().enumerate() {
+        if !contains_markdown_token(line, PDF_TASK_BLOCK_ID) {
+            continue;
+        }
+
+        task_block_line_count += 1;
+        if task_block_line_count > 1 {
+            return Err(CommandError::new(
+                "reference note has multiple generated PDF task lines with ^task block ID",
+            ));
+        }
+
+        let Some((checkbox_mark_index, checked, mark)) =
+            parse_markdown_task_checkbox(line)
+        else {
+            return Err(malformed_pdf_task_line_error(line_index));
+        };
+        if !contains_markdown_token(line, PDF_TASK_TAG)
+            || !contains_pdf_wikilink(line)
+        {
+            return Err(malformed_pdf_task_line_error(line_index));
+        }
+
+        found = Some(PdfTaskLine {
+            line_index,
+            checkbox_mark_index,
+            checked,
+            mark,
+        });
+    }
+
+    Ok(found
+        .map(PdfTaskLineState::Present)
+        .unwrap_or(PdfTaskLineState::Missing))
+}
+
+fn malformed_pdf_task_line_error(line_index: usize) -> CommandError {
+    CommandError::new(format!(
+        "generated PDF task line on line {} is malformed; expected '- [ ] #task [[...pdf]] ^task' or '- [x] #task [[...pdf]] ^task'",
+        line_index + 1
+    ))
+}
+
+fn contains_markdown_token(line: &str, token: &str) -> bool {
+    line.split_whitespace().any(|word| word == token)
+}
+
+fn parse_markdown_task_checkbox(line: &str) -> Option<(usize, bool, char)> {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+
+    if !bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b'-' | b'*' | b'+'))
+    {
+        return None;
+    }
+    index += 1;
+    if !bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+
+    if bytes.get(index) != Some(&b'[') || bytes.get(index + 2) != Some(&b']') {
+        return None;
+    }
+    let mark_index = index + 1;
+    let mark = *bytes.get(mark_index)? as char;
+    match mark {
+        ' ' => Some((mark_index, false, mark)),
+        'x' | 'X' => Some((mark_index, true, mark)),
+        _ => None,
+    }
+}
+
+fn contains_pdf_wikilink(line: &str) -> bool {
+    let mut remaining = line;
+    while let Some(start) = remaining.find("[[") {
+        let after_start = &remaining[start + 2..];
+        let Some(end) = after_start.find("]]") else {
+            return false;
+        };
+        let target = after_start[..end]
+            .split('|')
+            .next()
+            .unwrap_or("")
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if target.to_ascii_lowercase().ends_with(".pdf") {
+            return true;
+        }
+        remaining = &after_start[end + 2..];
+    }
+    false
+}
+
+fn apply_pdf_task_completion_signal(
+    resolution: &mut SyncResolution,
+    task_line: &PdfTaskLineState,
+    base_projection: Option<&Projection>,
+    marker_projection: &Projection,
+    frontmatter_projection: &Projection,
+) -> Result<PdfTaskCompletion> {
+    let checked = matches!(
+        task_line,
+        PdfTaskLineState::Present(PdfTaskLine { checked: true, .. })
+    );
+    let mut completion = PdfTaskCompletion {
+        found: matches!(task_line, PdfTaskLineState::Present(_)),
+        checked,
+        status_contributed: false,
+    };
+    if !checked || projection_status_is_done(&resolution.projection) {
+        return Ok(completion);
+    }
+
+    let conflicts = checked_task_status_conflicts(
+        base_projection,
+        marker_projection,
+        frontmatter_projection,
+    );
+    if !conflicts.is_empty() {
+        return Err(checked_task_status_conflict_error(&conflicts));
+    }
+
+    resolution.projection.insert(
+        FIELD_STATUS.to_string(),
+        MarkerValue::String("done".to_string()),
+    );
+    resolution.decision.frontmatter_contributed = true;
+    if !resolution.decision.reason.is_empty() {
+        resolution.decision.reason.push_str("; ");
+    }
+    resolution
+        .decision
+        .reason
+        .push_str("checked PDF task set status done");
+    completion.status_contributed = true;
+    Ok(completion)
+}
+
+#[derive(Debug, Clone)]
+struct CheckedTaskStatusConflict {
+    source: &'static str,
+    base: Option<MarkerValue>,
+    value: Option<MarkerValue>,
+}
+
+fn checked_task_status_conflicts(
+    base_projection: Option<&Projection>,
+    marker_projection: &Projection,
+    frontmatter_projection: &Projection,
+) -> Vec<CheckedTaskStatusConflict> {
+    let Some(base_projection) = base_projection else {
+        return Vec::new();
+    };
+
+    let mut conflicts = Vec::new();
+    for (source, projection) in [
+        ("marker", marker_projection),
+        ("frontmatter", frontmatter_projection),
+    ] {
+        let base = base_projection.get(FIELD_STATUS);
+        let value = projection.get(FIELD_STATUS);
+        if value != base && !status_value_is_done(value) {
+            conflicts.push(CheckedTaskStatusConflict {
+                source,
+                base: base.cloned(),
+                value: value.cloned(),
+            });
+        }
+    }
+    conflicts
+}
+
+fn checked_task_status_conflict_error(
+    conflicts: &[CheckedTaskStatusConflict],
+) -> CommandError {
+    let mut message = String::from(
+        "checked PDF task conflicts with marker/frontmatter status edit:",
+    );
+    for conflict in conflicts.iter().take(4) {
+        message.push_str(&format!(
+            "\n  {} status={}, base={}",
+            conflict.source,
+            diagnostic_projection_value(conflict.value.as_ref()),
+            diagnostic_projection_value(conflict.base.as_ref()),
+        ));
+    }
+    message.push_str(
+        "\nuncheck the PDF task or set the marker/frontmatter status to done",
+    );
+    CommandError::new(message)
+}
+
+fn projection_status_is_done(projection: &Projection) -> bool {
+    status_value_is_done(projection.get(FIELD_STATUS))
+}
+
+fn status_value_is_done(value: Option<&MarkerValue>) -> bool {
+    value.and_then(MarkerValue::as_string) == Some("done")
 }
 
 fn resolve_sync_projection(inputs: SyncInputs<'_>) -> Result<SyncResolution> {
@@ -2620,10 +2960,14 @@ impl ParsedNote {
         };
 
         let Some(rendered_highlights) = rendered_highlights else {
-            return Ok(self.body.clone());
+            return rewrite_pdf_task_checkbox(
+                &self.body,
+                projection_status_is_done(projection),
+            );
         };
         let replacement = rendered_highlights.content.as_str();
-        replace_managed_region(&self.body, replacement)
+        let body = replace_managed_region(&self.body, replacement)?;
+        rewrite_pdf_task_checkbox(&body, projection_status_is_done(projection))
     }
 
     fn managed_region(&self) -> Result<Option<&str>> {
@@ -2697,7 +3041,11 @@ fn default_note_body(
     body.push_str("# ");
     body.push_str(&title);
     body.push_str("\n\n");
-    body.push_str("- [ ] #task [[");
+    if projection_status_is_done(projection) {
+        body.push_str("- [x] #task [[");
+    } else {
+        body.push_str("- [ ] #task [[");
+    }
     body.push_str(source_pdf);
     body.push_str("]] ^task\n\n");
     body.push_str("## Highlights\n\n");
@@ -2793,6 +3141,54 @@ fn replace_managed_region(body: &str, replacement: &str) -> Result<String> {
     }
     rendered.push_str(&body[end..]);
     Ok(rendered)
+}
+
+fn rewrite_pdf_task_checkbox(body: &str, checked: bool) -> Result<String> {
+    replace_pdf_task_checkbox_mark(body, if checked { 'x' } else { ' ' })
+}
+
+fn replace_pdf_task_checkbox_mark(body: &str, mark: char) -> Result<String> {
+    let task_line = match parse_pdf_task_line(body)? {
+        PdfTaskLineState::Missing => return Ok(body.to_string()),
+        PdfTaskLineState::Present(task_line) => task_line,
+    };
+
+    if task_line.mark == mark {
+        return Ok(body.to_string());
+    }
+
+    let mut rendered = String::with_capacity(body.len());
+    for (line_index, segment) in body.split_inclusive('\n').enumerate() {
+        if line_index != task_line.line_index {
+            rendered.push_str(segment);
+            continue;
+        }
+        let (line, line_ending) = split_line_segment(segment);
+        rendered.push_str(&line[..task_line.checkbox_mark_index]);
+        rendered.push(mark);
+        rendered.push_str(&line[task_line.checkbox_mark_index + 1..]);
+        rendered.push_str(line_ending);
+    }
+    if !body.ends_with('\n') {
+        // split_inclusive includes the final unterminated segment, so this
+        // branch is only here to make the invariant obvious to future edits.
+        debug_assert_eq!(
+            rendered.lines().count(),
+            body.lines().count(),
+            "unterminated final line should be rewritten in the loop"
+        );
+    }
+    Ok(rendered)
+}
+
+fn split_line_segment(segment: &str) -> (&str, &str) {
+    if let Some(line) = segment.strip_suffix("\r\n") {
+        (line, "\r\n")
+    } else if let Some(line) = segment.strip_suffix('\n') {
+        (line, "\n")
+    } else {
+        (segment, "")
+    }
 }
 
 fn generated_block_ids(region: &str) -> BTreeSet<String> {
@@ -3905,6 +4301,102 @@ mod tests {
         );
         assert_eq!(same_key_different_value.conflicts.len(), 1);
         assert_eq!(same_key_different_value.conflicts[0].key, "status");
+    }
+
+    #[test]
+    fn highlights_ref_task_line_parser_recognizes_generated_pdf_task() {
+        assert_eq!(
+            super::parse_pdf_task_line("Body without generated task.\n")
+                .expect("parse missing task"),
+            super::PdfTaskLineState::Missing
+        );
+
+        let unchecked = super::parse_pdf_task_line(
+            "# Example\n\n- [ ] #task [[lib/books/example.pdf]] ^task\n",
+        )
+        .expect("parse unchecked task");
+        match unchecked {
+            super::PdfTaskLineState::Present(task) => {
+                assert_eq!(task.line_index, 2);
+                assert!(!task.checked);
+            }
+            super::PdfTaskLineState::Missing => panic!("expected task line"),
+        }
+
+        let checked = super::parse_pdf_task_line(
+            "- [X] #task [[lib/books/example.PDF|Example]] ^task\n",
+        )
+        .expect("parse checked task");
+        match checked {
+            super::PdfTaskLineState::Present(task) => assert!(task.checked),
+            super::PdfTaskLineState::Missing => panic!("expected task line"),
+        }
+    }
+
+    #[test]
+    fn highlights_ref_task_line_parser_rejects_malformed_and_duplicate_tasks() {
+        let missing_tag = super::parse_pdf_task_line(
+            "- [ ] [[lib/books/example.pdf]] ^task\n",
+        )
+        .expect_err("task without tag should fail");
+        assert!(
+            missing_tag.to_string().contains("malformed"),
+            "{missing_tag}"
+        );
+
+        let non_pdf = super::parse_pdf_task_line(
+            "- [ ] #task [[ref/example.md]] ^task\n",
+        )
+        .expect_err("task without PDF link should fail");
+        assert!(non_pdf.to_string().contains("malformed"), "{non_pdf}");
+
+        let duplicate = super::parse_pdf_task_line(
+            "- [ ] #task [[lib/one.pdf]] ^task\n- [x] #task [[lib/two.pdf]] ^task\n",
+        )
+        .expect_err("duplicate task block id should fail");
+        assert!(
+            duplicate
+                .to_string()
+                .contains("multiple generated PDF task"),
+            "{duplicate}"
+        );
+    }
+
+    #[test]
+    fn highlights_ref_task_checkbox_rewrite_and_dirty_allowance_are_narrow() {
+        let base_body = "\
+# Example
+
+- [ ] #task [[lib/example.pdf]] ^task
+
+## Highlights
+
+<!-- highlights:begin -->
+
+<!-- highlights:end -->
+";
+        let checked_body = base_body.replace("- [ ]", "- [X]");
+        assert!(super::bodies_differ_only_by_pdf_task_checkbox(
+            base_body,
+            &checked_body
+        ));
+
+        let rewritten = super::rewrite_pdf_task_checkbox(base_body, true)
+            .expect("rewrite task checkbox");
+        assert!(rewritten.contains("- [x] #task [[lib/example.pdf]] ^task\n"));
+
+        let unrelated_body = checked_body.replace("## Highlights", "Manual");
+        assert!(!super::bodies_differ_only_by_pdf_task_checkbox(
+            base_body,
+            &unrelated_body
+        ));
+
+        let base_note = format!("---\nstatus: wip\n---\n{base_body}");
+        let current_note = format!("---\nstatus: done\n---\n{checked_body}");
+        assert!(super::changes_confined_to_frontmatter_or_pdf_task_checkbox(
+            &base_note,
+            &current_note
+        ));
     }
 
     #[test]

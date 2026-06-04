@@ -2201,6 +2201,10 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
     assert_success(&output);
     let contents = fs::read_to_string(&note).expect("read updated ref note");
     assert!(contents.contains("status: done\n"), "{contents}");
+    assert!(
+        contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        "{contents}"
+    );
 }
 
 #[test]
@@ -2310,6 +2314,282 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
         fs::read_to_string(&note).expect("read settled note"),
         note_after_write
     );
+}
+
+#[test]
+fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
+    let temp = TempDir::new("bob-cli-highlights-ref-task-done");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights-ref sync"),
+    );
+    let checked_note = fs::read_to_string(&note)
+        .expect("read ref note")
+        .replace("- [ ] #task", "- [x] #task");
+    write_file(&note, &checked_note);
+    let marker_before = pdf_marker_contents(&pdf);
+    let pdf_hash_before_write = sha256_file(&pdf);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run checked task sync");
+
+    assert_success(&output);
+    let dry_run = stdout(&output);
+    assert!(
+        dry_run.contains("pdf_task: checked")
+            && dry_run.contains("pdf_task_contribution: status=done")
+            && dry_run.contains("note_action: update")
+            && dry_run.contains("pdf_marker_action: would-update")
+            && dry_run.contains("writes: none"),
+        "expected checked-task dry-run update preview:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(fs::read_to_string(&note).expect("read note"), checked_note);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run checked task scan");
+
+    assert_success(&output);
+    let scan = stdout(&output);
+    assert!(
+        scan.contains("pdf_task_contribution: status=done")
+            && scan.contains("pdf_marker_action: would-update")
+            && scan.contains("notes_update: 1")
+            && scan.contains("writes: none"),
+        "expected scan dry-run to preview marker work:\n{}",
+        format_output(&output)
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("checked task sync without PDF writes");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "checked task should require --write-pdf:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("--write-pdf"),
+        "expected --write-pdf refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(fs::read_to_string(&note).expect("read note"), checked_note);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("checked task scan without PDF writes");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "scan should refuse checked-task PDF marker writes:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("scan failed before writes")
+            && stderr(&output).contains("--write-pdf"),
+        "expected scan planning refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(fs::read_to_string(&note).expect("read note"), checked_note);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("checked task write-pdf sync");
+
+    assert_success(&output);
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: done\n"), "{marker}");
+    let pdf_hash_after_write = sha256_file(&pdf);
+    assert_ne!(
+        pdf_hash_before_write, pdf_hash_after_write,
+        "PDF marker write should refresh the source PDF hash"
+    );
+    let note_after_write = fs::read_to_string(&note).expect("read note");
+    assert!(
+        note_after_write.contains("status: done\n"),
+        "{note_after_write}"
+    );
+    assert!(
+        note_after_write.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        "{note_after_write}"
+    );
+    assert!(
+        note_after_write
+            .contains(&format!("source_pdf_sha256: {pdf_hash_after_write}\n")),
+        "note should record post-write PDF hash:\n{note_after_write}"
+    );
+    assert!(
+        !note_after_write
+            .contains(&format!("source_pdf_sha256: {pdf_hash_before_write}\n")),
+        "note should not retain pre-write PDF hash:\n{note_after_write}"
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("repeat checked task sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "checked-task write-back should settle:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn highlights_ref_task_checked_dirty_tracked_note_is_allowed() {
+    let temp = TempDir::new("bob-cli-highlights-ref-task-dirty");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights-ref sync"),
+    );
+    git_in(&vault, ["init", "-q"]);
+    git_in(&vault, ["config", "user.name", "Test User"]);
+    git_in(&vault, ["config", "user.email", "test@example.com"]);
+    git_in(&vault, ["add", "."]);
+    git_in(&vault, ["commit", "-q", "-m", "initial sync"]);
+    let checked_note = fs::read_to_string(&note)
+        .expect("read ref note")
+        .replace("- [ ] #task", "- [x] #task");
+    write_file(&note, &checked_note);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync dirty checked task");
+
+    assert_success(&output);
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: done\n"), "{marker}");
+    let contents = fs::read_to_string(&note).expect("read synced note");
+    assert!(contents.contains("status: done\n"), "{contents}");
+    assert!(
+        contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        "{contents}"
+    );
+}
+
+#[test]
+fn highlights_ref_task_checked_competing_status_edits_fail() {
+    for source in ["marker", "frontmatter"] {
+        let temp = TempDir::new(&format!(
+            "bob-cli-highlights-ref-task-conflict-{source}"
+        ));
+        let vault = temp.path().join("vault");
+        let pdf = vault.join("lib/example.pdf");
+        let note = vault.join("ref/example.md");
+        write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+        assert_success(
+            &bob_command()
+                .arg("highlights-ref")
+                .arg("sync")
+                .arg(&pdf)
+                .env("BOB_DIR", &vault)
+                .output()
+                .expect("initial highlights-ref sync"),
+        );
+
+        let mut edited = fs::read_to_string(&note)
+            .expect("read ref note")
+            .replace("- [ ] #task", "- [x] #task");
+        if source == "frontmatter" {
+            edited = edited.replace("status: wip", "status: abandoned");
+        } else {
+            set_pdf_marker_contents(
+                &pdf,
+                "- status: abandoned\n- parent: [[obsidian]]\n",
+            );
+        }
+        write_file(&note, &edited);
+        let note_before = fs::read_to_string(&note).expect("read note before");
+        let marker_before = pdf_marker_contents(&pdf);
+
+        let output = bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .arg("--write-pdf")
+            .env("BOB_DIR", &vault)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("sync checked task conflict for {source}: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "checked task conflict should fail for {source}:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains("checked PDF task conflicts")
+                && stderr(&output)
+                    .contains(&format!("{source} status=\"abandoned\"")),
+            "expected checked-task conflict report for {source}:\n{}",
+            format_output(&output)
+        );
+        assert_eq!(
+            fs::read_to_string(&note).expect("read note after conflict"),
+            note_before
+        );
+        assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    }
 }
 
 #[test]
