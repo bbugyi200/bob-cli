@@ -299,6 +299,24 @@ struct SyncWriteReport {
     marker_action: &'static str,
 }
 
+#[derive(Debug, Clone)]
+struct ScanFailure {
+    pdf: PathBuf,
+    error: CommandError,
+}
+
+#[derive(Debug, Clone)]
+enum ScanPlanOutcome {
+    Planned(Box<PdfSyncPlan>),
+    Failed(ScanFailure),
+}
+
+#[derive(Debug, Clone)]
+enum ScanWriteOutcome {
+    Written(SyncWriteReport),
+    Failed(ScanFailure),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GitStatus {
     MissingCommand,
@@ -434,49 +452,98 @@ fn scan_library(
     // `plan_pdf_sync` is a pure, read-only computation over an independent
     // `&Config` and one PDF path, so planning is embarrassingly parallel. We
     // collect into a position-keyed vector and reassemble in `pdfs` order so
-    // reporting output (and the aggregated error message) stays deterministic
-    // regardless of completion order.
-    let mut plans = Vec::new();
-    let mut errors = Vec::new();
-    for (pdf, result) in
-        pdfs.iter().zip(plan_pdfs(config, &pdfs, options, jobs))
-    {
-        match result {
-            Ok(plan) => plans.push(plan),
-            Err(error) => {
-                errors.push(format!("{}: {error}", pdf.display()));
-            }
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(CommandError::new(format!(
-            "scan failed before writes:\n  {}",
-            errors.join("\n  ")
-        )));
-    }
+    // reporting output stays deterministic regardless of completion order.
+    let plan_outcomes = pdfs
+        .iter()
+        .zip(plan_pdfs(config, &pdfs, options, jobs))
+        .map(|(pdf, result)| match result {
+            Ok(plan) => ScanPlanOutcome::Planned(Box::new(plan)),
+            Err(error) => ScanPlanOutcome::Failed(ScanFailure {
+                pdf: pdf.clone(),
+                error,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let plans = plan_outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            ScanPlanOutcome::Planned(plan) => Some(plan.as_ref()),
+            ScanPlanOutcome::Failed(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let plan_failures = plan_outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            ScanPlanOutcome::Planned(_) => None,
+            ScanPlanOutcome::Failed(failure) => Some(failure),
+        })
+        .collect::<Vec<_>>();
 
     print_config_report("scan", config);
     println!("dry_run: {}", options.dry_run);
     println!("ob_sync: not-run");
-    println!("pdf_count: {}", plans.len());
-    for plan in &plans {
-        print_scan_plan_entry(plan);
+    println!("pdf_count: {}", pdfs.len());
+    for outcome in &plan_outcomes {
+        match outcome {
+            ScanPlanOutcome::Planned(plan) => print_scan_plan_entry(plan),
+            ScanPlanOutcome::Failed(failure) => {
+                print_scan_plan_failure_entry(failure);
+            }
+        }
     }
 
     if options.dry_run {
-        print_scan_plan_summary(&plans);
+        print_scan_plan_summary(&plans, plan_failures.len());
         println!("writes: none");
-        return Ok(());
+        return if plan_failures.is_empty() {
+            Ok(())
+        } else {
+            Err(scan_partial_failure_error(&plan_failures, &[]))
+        };
     }
 
-    ensure_safe_to_write(config, plans.iter())?;
-    let mut reports = Vec::new();
+    ensure_safe_to_write(config, plans.iter().copied())?;
+    let mut write_outcomes = Vec::new();
     for plan in &plans {
-        reports.push(execute_pdf_sync(config, plan)?);
+        match execute_pdf_sync(config, plan) {
+            Ok(report) => {
+                write_outcomes.push(ScanWriteOutcome::Written(report))
+            }
+            Err(error) => {
+                write_outcomes.push(ScanWriteOutcome::Failed(ScanFailure {
+                    pdf: plan.pdf.clone(),
+                    error,
+                }));
+            }
+        }
     }
-    print_scan_write_summary(&reports);
-    Ok(())
+    let reports = write_outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            ScanWriteOutcome::Written(report) => Some(*report),
+            ScanWriteOutcome::Failed(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let write_failures = write_outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            ScanWriteOutcome::Written(_) => None,
+            ScanWriteOutcome::Failed(failure) => Some(failure),
+        })
+        .collect::<Vec<_>>();
+    for failure in &write_failures {
+        print_scan_write_failure_entry(failure);
+    }
+    print_scan_write_summary(
+        &reports,
+        plan_failures.len(),
+        write_failures.len(),
+    );
+    if plan_failures.is_empty() && write_failures.is_empty() {
+        Ok(())
+    } else {
+        Err(scan_partial_failure_error(&plan_failures, &write_failures))
+    }
 }
 
 /// Plan every PDF, returning results in the same order as `pdfs`.
@@ -858,7 +925,17 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     }
 }
 
-fn print_scan_plan_summary(plans: &[PdfSyncPlan]) {
+fn print_scan_plan_failure_entry(failure: &ScanFailure) {
+    println!("pdf: {}", failure.pdf.display());
+    println!("  plan_error: {}", failure.error);
+}
+
+fn print_scan_write_failure_entry(failure: &ScanFailure) {
+    println!("write_failure: {}", failure.pdf.display());
+    println!("  error: {}", failure.error);
+}
+
+fn print_scan_plan_summary(plans: &[&PdfSyncPlan], plan_failure_count: usize) {
     let creates = plans
         .iter()
         .filter(|plan| plan.stable_note_action == "create")
@@ -878,9 +955,19 @@ fn print_scan_plan_summary(plans: &[PdfSyncPlan]) {
     println!("  notes_update: {updates}");
     println!("  notes_unchanged: {unchanged}");
     println!("  pdf_markers_would_update: {marker_updates}");
+    println!("  pdfs_planned: {}", plans.len());
+    println!("  plan_failures: {plan_failure_count}");
+    println!("  scan_failures: {plan_failure_count}");
+    if plan_failure_count > 0 {
+        println!("result: partial-failure");
+    }
 }
 
-fn print_scan_write_summary(reports: &[SyncWriteReport]) {
+fn print_scan_write_summary(
+    reports: &[SyncWriteReport],
+    plan_failure_count: usize,
+    write_failure_count: usize,
+) {
     let creates = reports
         .iter()
         .filter(|report| report.note_action == "create")
@@ -902,6 +989,16 @@ fn print_scan_write_summary(reports: &[SyncWriteReport]) {
     println!("  notes_updated: {updates}");
     println!("  notes_unchanged: {unchanged}");
     println!("  pdf_markers_updated: {marker_updates}");
+    println!("  write_successes: {}", reports.len());
+    println!("  plan_failures: {plan_failure_count}");
+    println!("  write_failures: {write_failure_count}");
+    println!(
+        "  scan_failures: {}",
+        plan_failure_count + write_failure_count
+    );
+    if plan_failure_count + write_failure_count > 0 {
+        println!("result: partial-failure");
+    }
     let note_writes = reports.iter().any(|report| report.note_action != "none");
     let marker_writes =
         reports.iter().any(|report| report.marker_action != "none");
@@ -914,6 +1011,33 @@ fn print_scan_write_summary(reports: &[SyncWriteReport]) {
             (true, true) => "note,pdf",
         }
     );
+}
+
+fn scan_partial_failure_error(
+    plan_failures: &[&ScanFailure],
+    write_failures: &[&ScanFailure],
+) -> CommandError {
+    let total = plan_failures.len() + write_failures.len();
+    let mut message = format!("scan completed with {total} per-PDF failure(s)");
+    if !plan_failures.is_empty() {
+        message.push_str("\nplanning failures:");
+        for failure in plan_failures {
+            message.push_str("\n  ");
+            message.push_str(&failure.pdf.display().to_string());
+            message.push_str(": ");
+            message.push_str(&failure.error.to_string());
+        }
+    }
+    if !write_failures.is_empty() {
+        message.push_str("\nwrite failures:");
+        for failure in write_failures {
+            message.push_str("\n  ");
+            message.push_str(&failure.pdf.display().to_string());
+            message.push_str(": ");
+            message.push_str(&failure.error.to_string());
+        }
+    }
+    CommandError::new(message)
 }
 
 fn show_marker(config: &Config, pdf: &Path) -> Result<()> {
@@ -1312,13 +1436,8 @@ fn dirty_note_allowed_change(
     base: &str,
     current: &str,
 ) -> Option<DirtyNoteAllowedChange> {
-    let Some((base_frontmatter, base_body)) = split_frontmatter(base) else {
-        return None;
-    };
-    let Some((current_frontmatter, current_body)) = split_frontmatter(current)
-    else {
-        return None;
-    };
+    let (base_frontmatter, base_body) = split_frontmatter(base)?;
+    let (current_frontmatter, current_body) = split_frontmatter(current)?;
     let frontmatter_changed = base_frontmatter != current_frontmatter;
     let task_checkbox_changed =
         bodies_differ_only_by_pdf_task_checkbox(&base_body, &current_body);

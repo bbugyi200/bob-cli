@@ -20,10 +20,11 @@ sidecar when one is present. Top-level library PDFs and explicit out-of-library
 syncs keep the legacy `ref/<pdf-basename>.md` target. `marker <pdf>` inspects
 the same marker without writing.
 
-`scan` recursively finds PDFs under the configured library directory, preflights
-all target note paths before writing anything, and then syncs each PDF in stable
-path order. It refuses duplicate output paths such as two PDFs that would both
-write the same `ref/<ref_type>/<basename>.md` target.
+`scan` recursively finds PDFs under the configured library directory and
+processes them in stable path order. Per-PDF validation or write failures are
+reported without stopping unrelated PDFs; the final command status is still
+non-zero when any PDF fails. It refuses duplicate output paths such as two PDFs
+that would both write the same `ref/<ref_type>/<basename>.md` target.
 
 `doctor` checks vault paths, library/ref directories, sidecar presence, marker
 readability, Git worktree status, and optional `ob` availability. It never
@@ -244,17 +245,24 @@ writes so the apps do not race the CLI.
 
 ## Scan, Safety, and Git/ob Behavior
 
-`scan --dry-run` reports every PDF it would process, each target reference note,
-the sidecar path if present, the selected sync source, and the note/PDF marker
-action. It does not create directories, write notes, or write PDFs.
+`scan --dry-run` reports every discovered PDF. Valid PDFs show their target
+reference note, sidecar path if present, selected sync source, and note/PDF
+marker action. Invalid PDFs show a `plan_error`. Dry runs do not create
+directories, write notes, or write PDFs.
 
-Before a writing scan, the command builds the complete plan for every PDF,
-rejects duplicate output paths, and checks Git status for existing vault files
-it would modify. If a target ref note or PDF marker target is dirty, it fails
-before any write, except for a tracked target ref note whose only body change is
-the exact generated `^task` checkbox toggle, optionally combined with
+Before a writing scan, the command rejects duplicate output paths, builds
+per-PDF plans, and checks Git status for existing vault files that successfully
+planned PDFs would modify. If a target ref note or PDF marker target is dirty,
+it fails before any write, except for a tracked target ref note whose only body
+change is the exact generated `^task` checkbox toggle, optionally combined with
 frontmatter edits. There is no force mode in the MVP; commit, stash, or clean
 unrelated dirty files before rerunning.
+
+Planning failures for one PDF do not stop valid plans from writing. Write-time
+failures such as a changed note/PDF or temporary save failure are reported as
+`write_failure` entries, and later valid PDFs continue. The scan summary reports
+`plan_failures`, `write_failures`, and `scan_failures`; any non-zero failure
+count makes the command exit non-zero even when other PDFs were processed.
 
 Reference note writes are atomic temporary-file renames and are skipped when the
 rendered note is byte-identical to the existing file.
@@ -465,7 +473,8 @@ MacBook validation checklist:
   readability, Git status, and optional `ob` availability.
 - `bob highlights-ref scan --dry-run` lists the expected PDFs under
   `~/bob/lib`, reports the intended `~/bob/ref/<ref_type>/*.md` targets, and
-  prints `writes: none`.
+  prints `writes: none`. If `scan_failures` is non-zero, inspect the per-PDF
+  `plan_error` lines while noting that valid PDFs were still reported.
 - `bob highlights-ref sync ~/bob/lib/books/example.pdf --dry-run` shows the
   expected marker page/note, sync source, sidecar path, note action, and no
   writes.
@@ -709,6 +718,13 @@ bob highlights-ref sync ~/bob/lib/books/example.pdf --write-pdf
 
 Common failure snippets and fixes:
 
+During `scan`, marker validation, sidecar validation, managed-region
+validation, `--write-pdf` refusals, and per-PDF write races are reported for the
+affected PDF while unrelated valid PDFs may still be planned or written. The
+summary shows `result: partial-failure` and the command exits non-zero when any
+PDF fails. Library discovery errors, output path collisions, and dirty target
+preflight failures remain hard global failures before writes.
+
 | Message snippet | Meaning | Fix |
 | --- | --- | --- |
 | `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
@@ -727,5 +743,6 @@ Common failure snippets and fixes:
 | `checked PDF task conflicts` | The generated task says `status: done`, but marker or frontmatter changed `status` to another value from the stored base. | Uncheck the task or set the marker/frontmatter status to `done`. |
 | `marker/frontmatter conflict` | Marker and frontmatter changed the same field differently, or the note has no stored base snapshot for a safe merge. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
 | `changed during sync; rerun` | The note or PDF changed after planning and before writing. | Rerun after closing or pausing apps that may touch the file. |
+| `scan completed with ... per-PDF failure(s)` | A recursive scan finished reporting or writing valid PDFs, but at least one PDF had a `plan_error` or `write_failure`. | Fix the named PDFs and rerun; review successful writes before assuming the scan wrote nothing. |
 | `existing reference note is missing the managed Highlights region` | An existing ref note lacks `<!-- highlights:begin -->` and `<!-- highlights:end -->`. | Add both markers around the generated section or move the note aside and regenerate. |
 | `unsupported textbundle sidecar` | The `.textbundle` has no `text.md` or `text.markdown`. | Switch Highlights to Markdown sidecars or add one of those files. |

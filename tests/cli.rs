@@ -1533,13 +1533,19 @@ fn highlights_ref_scan_treats_later_page_note_as_missing_marker() {
         "later page marker-like note should fail:\n{}",
         format_output(&output)
     );
+    let report = stdout(&output);
     assert!(
-        stderr(&output).contains("scan failed before writes")
-            && stderr(&output).contains(path_str(&pdf))
-            && stderr(&output).contains(
+        report.contains(path_str(&pdf))
+            && report.contains("plan_error:")
+            && report.contains(
                 "no standalone /Text note annotations found on page 1"
             ),
         "expected page-1 missing marker error:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
         format_output(&output)
     );
     assert!(!note.exists(), "scan must not write a note on marker error");
@@ -1707,10 +1713,16 @@ fn highlights_ref_rejects_wikilink_marker_parent_before_writes() {
         "linked marker parent should fail scan planning:\n{}",
         format_output(&scan)
     );
+    let report = stdout(&scan);
     assert!(
-        stderr(&scan).contains("scan failed before writes")
-            && stderr(&scan).contains("wikilinks are not supported"),
+        report.contains("plan_error:")
+            && report.contains("wikilinks are not supported"),
         "expected scan linked parent error:\n{}",
+        format_output(&scan)
+    );
+    assert!(
+        stderr(&scan).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
         format_output(&scan)
     );
     assert!(!note.exists(), "scan must not write a note on marker error");
@@ -1957,6 +1969,198 @@ Note: marker note
     let repeated = stdout(&output);
     assert!(repeated.contains("notes_unchanged: 2"), "{repeated}");
     assert!(repeated.contains("writes: none"), "{repeated}");
+}
+
+#[test]
+fn highlights_ref_scan_dry_run_reports_valid_and_invalid_pdfs() {
+    let temp = TempDir::new("bob-cli-highlights-ref-scan-mixed-dry-run");
+    let vault = temp.path().join("vault");
+    let valid_pdf = vault.join("lib/books/valid.pdf");
+    let invalid_pdf = vault.join("lib/papers/invalid.pdf");
+    let valid_note = vault.join("ref/books/valid.md");
+    let invalid_note = vault.join("ref/papers/invalid.md");
+    write_highlights_pdf(
+        &valid_pdf,
+        "- status: wip\n- parent: obsidian\n- title: Valid PDF\n",
+    );
+    write_highlights_pdf(
+        &invalid_pdf,
+        "- parent: obsidian\n- title: Missing Status\n",
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("mixed dry-run highlights-ref scan");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "mixed dry-run scan should return non-zero:\n{}",
+        format_output(&output)
+    );
+    let report = stdout(&output);
+    assert!(report.contains("pdf_count: 2"), "{report}");
+    assert!(
+        report.contains(path_str(&valid_note))
+            && report.contains("notes_create: 1")
+            && report.contains("pdfs_planned: 1"),
+        "valid PDF should still be planned:\n{report}"
+    );
+    assert!(
+        report.contains(path_str(&invalid_pdf))
+            && report
+                .contains("plan_error: missing required marker key: status")
+            && report.contains("plan_failures: 1")
+            && report.contains("scan_failures: 1")
+            && report.contains("writes: none"),
+        "invalid PDF should be reported without writes:\n{report}"
+    );
+    assert!(
+        stderr(&output).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
+        format_output(&output)
+    );
+    assert!(!valid_note.exists(), "dry-run must not create valid note");
+    assert!(
+        !invalid_note.exists(),
+        "dry-run must not create invalid note"
+    );
+}
+
+#[test]
+fn highlights_ref_scan_writes_valid_pdfs_despite_invalid_pdf() {
+    let temp = TempDir::new("bob-cli-highlights-ref-scan-mixed-write");
+    let vault = temp.path().join("vault");
+    let valid_pdf = vault.join("lib/books/valid.pdf");
+    let invalid_pdf = vault.join("lib/papers/invalid.pdf");
+    let valid_note = vault.join("ref/books/valid.md");
+    let invalid_note = vault.join("ref/papers/invalid.md");
+    write_highlights_pdf(
+        &valid_pdf,
+        "- status: wip\n- parent: obsidian\n- title: Valid PDF\n",
+    );
+    write_highlights_pdf(
+        &invalid_pdf,
+        "- parent: obsidian\n- title: Missing Status\n",
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("mixed write highlights-ref scan");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "mixed write scan should return non-zero:\n{}",
+        format_output(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains(path_str(&valid_note))
+            && report.contains("notes_created: 1")
+            && report.contains("write_successes: 1")
+            && report.contains("writes: note"),
+        "valid PDF should be written:\n{report}"
+    );
+    assert!(
+        report.contains(path_str(&invalid_pdf))
+            && report
+                .contains("plan_error: missing required marker key: status")
+            && report.contains("plan_failures: 1")
+            && report.contains("scan_failures: 1"),
+        "invalid PDF should be reported:\n{report}"
+    );
+    assert!(
+        stderr(&output).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
+        format_output(&output)
+    );
+    let valid_contents =
+        fs::read_to_string(&valid_note).expect("read valid note");
+    assert!(
+        valid_contents.contains("title: \"Valid PDF\"\n"),
+        "{valid_contents}"
+    );
+    assert!(
+        !invalid_note.exists(),
+        "scan must not create a note for invalid PDF"
+    );
+}
+
+#[test]
+fn highlights_ref_scan_continues_after_write_failure() {
+    let temp = TempDir::new("bob-cli-highlights-ref-scan-write-failure");
+    let vault = temp.path().join("vault");
+    let fail_pdf = vault.join("lib/books/a-fail.pdf");
+    let later_pdf = vault.join("lib/books/b-later.pdf");
+    let fail_note = vault.join("ref/books/a-fail.md");
+    let later_note = vault.join("ref/books/b-later.md");
+    write_highlights_pdf(
+        &fail_pdf,
+        "- status: wip\n- parent: obsidian\n- title: Fails At Write\n",
+    );
+    write_highlights_pdf(
+        &later_pdf,
+        "- status: wip\n- parent: obsidian\n- title: Later Still Writes\n",
+    );
+
+    let fail_parent = fail_note.parent().expect("fail note parent");
+    let fail_name = fail_note.file_name().expect("fail note filename");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(
+            "set -eu\n\
+             mkdir -p \"$FAIL_PARENT\"\n\
+             mkdir \"$FAIL_PARENT/.$FAIL_NAME.$$.tmp\"\n\
+             exec \"$BOB_BIN\" highlights-ref scan\n",
+        )
+        .env("BOB_BIN", BOB_BIN)
+        .env("BOB_DIR", &vault)
+        .env("FAIL_PARENT", fail_parent)
+        .env("FAIL_NAME", fail_name)
+        .output()
+        .expect("write-failure highlights-ref scan");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "write failure scan should return non-zero:\n{}",
+        format_output(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains(path_str(&fail_pdf))
+            && report.contains("write_failure:")
+            && report.contains("write temporary file"),
+        "failed PDF should be reported as a write failure:\n{report}"
+    );
+    assert!(
+        report.contains(path_str(&later_note))
+            && report.contains("write_successes: 1")
+            && report.contains("write_failures: 1")
+            && report.contains("scan_failures: 1")
+            && report.contains("writes: note"),
+        "later valid PDF should still be written:\n{report}"
+    );
+    assert!(
+        stderr(&output).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
+        format_output(&output)
+    );
+    assert!(!fail_note.exists(), "failed note must not be installed");
+    let later_contents =
+        fs::read_to_string(&later_note).expect("read later note");
+    assert!(
+        later_contents.contains("title: \"Later Still Writes\"\n"),
+        "{later_contents}"
+    );
 }
 
 #[test]
@@ -2487,10 +2691,18 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
         "scan should refuse checked-task PDF marker writes:\n{}",
         format_output(&output)
     );
+    let report = stdout(&output);
     assert!(
-        stderr(&output).contains("scan failed before writes")
-            && stderr(&output).contains("--write-pdf"),
+        report.contains("plan_error:")
+            && report.contains("--write-pdf")
+            && report.contains("plan_failures: 1")
+            && report.contains("writes: none"),
         "expected scan planning refusal:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("scan completed with 1 per-PDF failure(s)"),
+        "expected partial failure stderr:\n{}",
         format_output(&output)
     );
     assert_eq!(pdf_marker_contents(&pdf), marker_before);
