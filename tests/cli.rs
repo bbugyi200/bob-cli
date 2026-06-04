@@ -1390,7 +1390,8 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
         "{contents}"
     );
     assert!(
-        contents.contains("PDF: [[lib/systems-performance.pdf]] ^pdf\n"),
+        contents
+            .contains("- [ ] #task [[lib/systems-performance.pdf]] ^task\n"),
         "{contents}"
     );
     assert!(
@@ -2549,7 +2550,9 @@ Note: Keep a standalone observation after the marker.
     assert!(contents.contains("highlights_synced_at: "), "{contents}");
     assert!(contents.contains("# Systems Performance\n"), "{contents}");
     assert!(
-        contents.contains("PDF: [[lib/books/systems-performance.pdf]] ^pdf\n"),
+        contents.contains(
+            "- [ ] #task [[lib/books/systems-performance.pdf]] ^task\n"
+        ),
         "{contents}"
     );
     assert!(

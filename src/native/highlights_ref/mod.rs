@@ -2695,9 +2695,9 @@ fn default_note_body(
     body.push_str("# ");
     body.push_str(&title);
     body.push_str("\n\n");
-    body.push_str("PDF: [[");
+    body.push_str("- [ ] #task [[");
     body.push_str(source_pdf);
-    body.push_str("]] ^pdf\n\n");
+    body.push_str("]] ^task\n\n");
     body.push_str("## Highlights\n\n");
     body.push_str(MANAGED_BODY_BEGIN);
     body.push_str("\n\n");

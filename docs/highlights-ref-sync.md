@@ -341,8 +341,8 @@ The generated region is the only body region the tool owns:
 Manual content outside those markers must be preserved. User edits inside the
 generated region may be overwritten.
 
-New generated notes include a title, a PDF wikilink line with the stable
-`^pdf` block ID, and `## Highlights`.
+New generated notes include a title, a PDF wikilink Obsidian task line with
+the stable `^task` block ID, and `## Highlights`.
 Existing notes must already contain the managed begin/end markers; otherwise
 `sync` fails instead of guessing where generated content belongs.
 
