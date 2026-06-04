@@ -1482,7 +1482,7 @@ fn highlights_ref_marker_uses_first_page_text_annotation() {
         &pdf,
         &[
             &["- status: wip\n- parent: obsidian\n- title: Page One\n"],
-            &["- status: done\n- parent: ignored\n- title: Page Two\n"],
+            &["- status: read\n- parent: ignored\n- title: Page Two\n"],
         ],
     );
 
@@ -1738,7 +1738,7 @@ fn highlights_ref_sync_rejects_malformed_and_duplicate_marker_lists() {
         ),
         (
             "duplicate-marker-key",
-            "- status: wip\n- parent: obsidian\n- Status: done\n",
+            "- status: wip\n- parent: obsidian\n- Status: read\n",
             "duplicate marker key on line 3",
         ),
         (
@@ -2322,7 +2322,7 @@ fn highlights_ref_sync_refuses_dirty_target_note_before_writing() {
         .expect("read note")
         .replace("## Highlights\n\n", "Local edit.\n\n## Highlights\n\n");
     write_file(&note, &dirty_note);
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
+    set_pdf_marker_contents(&pdf, "- status: read\n- parent: obsidian\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -2373,7 +2373,7 @@ fn highlights_ref_sync_allows_dirty_tracked_frontmatter_writeback() {
     git_in(&vault, ["commit", "-q", "-m", "initial sync"]);
     let edited = fs::read_to_string(&note)
         .expect("read ref note")
-        .replace("status: wip", "status: done");
+        .replace("status: wip", "status: read");
     write_file(&note, &edited);
 
     let output = bob_command()
@@ -2387,9 +2387,9 @@ fn highlights_ref_sync_allows_dirty_tracked_frontmatter_writeback() {
 
     assert_success(&output);
     let marker = pdf_marker_contents(&pdf);
-    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- status: read\n"), "{marker}");
     let contents = fs::read_to_string(&note).expect("read updated note");
-    assert!(contents.contains("status: done\n"), "{contents}");
+    assert!(contents.contains("status: read\n"), "{contents}");
 }
 
 #[test]
@@ -2456,7 +2456,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
+    set_pdf_marker_contents(&pdf, "- status: read\n- parent: obsidian\n");
     let output = bob_command()
         .arg("highlights-ref")
         .arg("sync")
@@ -2467,7 +2467,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
 
     assert_success(&output);
     let contents = fs::read_to_string(&note).expect("read updated ref note");
-    assert!(contents.contains("status: done\n"), "{contents}");
+    assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
         contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
         "{contents}"
@@ -2495,7 +2495,7 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
     );
     let edited = fs::read_to_string(&note)
         .expect("read ref note")
-        .replace("status: wip", "status: done");
+        .replace("status: wip", "status: read");
     write_file(&note, &edited);
     let marker_before = pdf_marker_contents(&pdf);
 
@@ -2544,7 +2544,7 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
 
     assert_success(&output);
     let marker = pdf_marker_contents(&pdf);
-    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- status: read\n"), "{marker}");
     assert!(marker.contains("- parent: obsidian\n"), "{marker}");
     assert!(
         marker.contains("- title: The Log is the Agent\n"),
@@ -2592,8 +2592,178 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
 }
 
 #[test]
+fn highlights_ref_deprecated_done_status_migrates_to_read_with_pdf_write() {
+    let temp = TempDir::new("bob-cli-highlights-ref-done-migration");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights-ref")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights-ref sync"),
+    );
+
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
+    let old_done_note = fs::read_to_string(&note)
+        .expect("read generated ref note")
+        .replace("status: wip", "status: done")
+        .replace("\\\"status\\\":\\\"wip\\\"", "\\\"status\\\":\\\"done\\\"");
+    assert!(
+        old_done_note.contains("\\\"status\\\":\\\"done\\\""),
+        "test must simulate old stored base status:\n{old_done_note}"
+    );
+    write_file(&note, &old_done_note);
+    let marker_before = pdf_marker_contents(&pdf);
+    let pdf_hash_before_write = sha256_file(&pdf);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run deprecated done migration");
+
+    assert_success(&output);
+    let dry_run = stdout(&output);
+    assert!(
+        dry_run.contains("status_normalization: done->read")
+            && dry_run.contains("marker,frontmatter,base")
+            && dry_run.contains("pdf_marker_action: would-update")
+            && dry_run.contains("note_action: update")
+            && dry_run.contains("writes: none"),
+        "expected done->read migration dry-run report:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(
+        fs::read_to_string(&note).expect("read note after dry-run"),
+        old_done_note
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("deprecated done sync without PDF writes");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "deprecated marker normalization should require --write-pdf:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("--write-pdf"),
+        "expected --write-pdf refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(
+        fs::read_to_string(&note).expect("read note after refusal"),
+        old_done_note
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run scan deprecated done migration");
+
+    assert_success(&output);
+    let scan_dry_run = stdout(&output);
+    assert!(
+        scan_dry_run.contains("status_normalization: done->read")
+            && scan_dry_run.contains("pdf_marker_action: would-update")
+            && scan_dry_run.contains("writes: none"),
+        "expected scan dry-run migration report:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("writing scan deprecated done migration");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "writing scan should refuse deprecated marker normalization:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output).contains("plan_error:")
+            && stdout(&output).contains("--write-pdf")
+            && stdout(&output).contains("writes: none"),
+        "expected scan planning refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(
+        fs::read_to_string(&note).expect("read note after scan refusal"),
+        old_done_note
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("write deprecated done migration");
+
+    assert_success(&output);
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: read\n"), "{marker}");
+    assert!(!marker.contains("- status: done\n"), "{marker}");
+    let pdf_hash_after_write = sha256_file(&pdf);
+    assert_ne!(pdf_hash_before_write, pdf_hash_after_write);
+    let migrated_note = fs::read_to_string(&note).expect("read migrated note");
+    assert!(migrated_note.contains("status: read\n"), "{migrated_note}");
+    assert!(
+        migrated_note.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        "{migrated_note}"
+    );
+    assert!(
+        !migrated_note.contains("status: done")
+            && !migrated_note.contains("\\\"status\\\":\\\"done\\\""),
+        "{migrated_note}"
+    );
+
+    let output = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("repeat deprecated done migration sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "done migration should settle:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
 fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
-    let temp = TempDir::new("bob-cli-highlights-ref-task-done");
+    let temp = TempDir::new("bob-cli-highlights-ref-task-read");
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
@@ -2627,7 +2797,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
     let dry_run = stdout(&output);
     assert!(
         dry_run.contains("pdf_task: checked")
-            && dry_run.contains("pdf_task_contribution: status=done")
+            && dry_run.contains("pdf_task_contribution: status=read")
             && dry_run.contains("note_action: update")
             && dry_run.contains("pdf_marker_action: would-update")
             && dry_run.contains("writes: none"),
@@ -2648,7 +2818,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
     assert_success(&output);
     let scan = stdout(&output);
     assert!(
-        scan.contains("pdf_task_contribution: status=done")
+        scan.contains("pdf_task_contribution: status=read")
             && scan.contains("pdf_marker_action: would-update")
             && scan.contains("notes_update: 1")
             && scan.contains("writes: none"),
@@ -2719,7 +2889,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
 
     assert_success(&output);
     let marker = pdf_marker_contents(&pdf);
-    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- status: read\n"), "{marker}");
     let pdf_hash_after_write = sha256_file(&pdf);
     assert_ne!(
         pdf_hash_before_write, pdf_hash_after_write,
@@ -2727,7 +2897,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
     );
     let note_after_write = fs::read_to_string(&note).expect("read note");
     assert!(
-        note_after_write.contains("status: done\n"),
+        note_after_write.contains("status: read\n"),
         "{note_after_write}"
     );
     assert!(
@@ -2799,9 +2969,9 @@ fn highlights_ref_task_checked_dirty_tracked_note_is_allowed() {
 
     assert_success(&output);
     let marker = pdf_marker_contents(&pdf);
-    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- status: read\n"), "{marker}");
     let contents = fs::read_to_string(&note).expect("read synced note");
-    assert!(contents.contains("status: done\n"), "{contents}");
+    assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
         contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
         "{contents}"
@@ -2892,7 +3062,7 @@ fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
+    set_pdf_marker_contents(&pdf, "- status: read\n- parent: obsidian\n");
     let edited = fs::read_to_string(&note).expect("read ref note").replace(
         "parent: \"[[obsidian]]\"\n",
         "parent: \"[[obsidian]]\"\ntitle: \"Frontmatter Title\"\n",
@@ -2937,11 +3107,11 @@ fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
         format_output(&output)
     );
     let marker = pdf_marker_contents(&pdf);
-    assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- status: read\n"), "{marker}");
     assert!(marker.contains("- parent: obsidian\n"), "{marker}");
     assert!(marker.contains("- title: Frontmatter Title\n"), "{marker}");
     let note_after = fs::read_to_string(&note).expect("read merged note");
-    assert!(note_after.contains("status: done\n"), "{note_after}");
+    assert!(note_after.contains("status: read\n"), "{note_after}");
     assert!(
         note_after.contains("title: \"Frontmatter Title\"\n"),
         "{note_after}"
@@ -3073,7 +3243,7 @@ fn highlights_ref_conflicting_edits_fail_and_prefer_frontmatter_resolves() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
+    set_pdf_marker_contents(&pdf, "- status: read\n- parent: obsidian\n");
     let frontmatter_side = fs::read_to_string(&note)
         .expect("read ref note")
         .replace("status: wip", "status: abandoned");
@@ -3102,7 +3272,7 @@ fn highlights_ref_conflicting_edits_fail_and_prefer_frontmatter_resolves() {
         format_output(&output)
     );
     assert!(
-        stderr(&output).contains("status: marker=\"done\"")
+        stderr(&output).contains("status: marker=\"read\"")
             && stderr(&output).contains("frontmatter=\"abandoned\"")
             && stderr(&output).contains("base=\"wip\""),
         "expected field-level conflict report:\n{}",

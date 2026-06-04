@@ -148,9 +148,12 @@ Obsidian wikilink, for example `parent: "[[obsidian]]"`.
 
 - `unread`
 - `wip`
-- `done`
+- `read`
 - `abandoned`
 - `legacy`
+
+Existing `status: done` marker/frontmatter/base inputs are accepted only as a
+deprecated alias and are normalized to `read` during sync.
 
 Values should be parsed as a YAML-compatible subset when possible:
 
@@ -225,7 +228,7 @@ Implemented conflict policy:
 - If only frontmatter changed, update the PDF marker note when PDF writes are
   enabled.
 - If the generated PDF task line is checked, treat that as a note-side
-  `status: done` signal.
+  `status: read` signal.
 - If marker and frontmatter changed different fields from the stored base,
   auto-merge them. PDF marker writes are still opt-in with `--write-pdf`.
 - If both changed the same field differently, fail without modifying either side unless
@@ -379,8 +382,8 @@ The generated task line is a completion affordance:
 - [ ] #task [[lib/books/example.pdf]] ^task
 ```
 
-Checking it with `[x]` or `[X]` means `status: done`. Unchecking it does not
-infer a replacement status. When the final synced status is `done`, `sync`
+Checking it with `[x]` or `[X]` means `status: read`. Unchecking it does not
+infer a replacement status. When the final synced status is `read`, `sync`
 checks the generated task line if it is present; existing notes without that
 exact generated line are not bulk-migrated. If the checked task would update
 the PDF marker, `sync --dry-run` previews `pdf_marker_action: would-update`,
@@ -730,7 +733,7 @@ preflight failures remain hard global failures before writes.
 | `library directory does not exist or is not a directory` | `~/bob/lib` is missing or `--lib-dir` points at the wrong path. | Create `~/bob/lib` or pass the intended `--lib-dir`. |
 | `no standalone /Text note annotations found on page 1` | The PDF has no page-1 standalone marker note. | Add the first standalone PDF note on page 1 in Highlights. |
 | `missing required marker key: status` | The marker list lacks `status`. | Add `- status: wip` to the marker. |
-| `unsupported status` | `status` is not one of `unread`, `wip`, `done`, `abandoned`, or `legacy`. | Change the marker or frontmatter status to a supported value. |
+| `unsupported status` | `status` is not one of `unread`, `wip`, `read`, `abandoned`, or `legacy`. | Change the marker or frontmatter status to a supported value. |
 | `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add a bare marker parent such as `- parent: obsidian`, or add frontmatter parent such as `parent: "[[obsidian]]"`. |
 | `wikilinks are not supported` | The PDF marker `parent` uses Obsidian link syntax. | Remove the brackets in the PDF marker, e.g. use `- parent: obsidian`. |
 | `'type' is command-managed` | The marker tries to set the generated note `type`. | Remove `type` from the marker; generated notes get `type: "[[ref]]"` automatically. |
@@ -740,7 +743,7 @@ preflight failures remain hard global failures before writes.
 | `output path collision(s) detected before writes` | Multiple PDFs would write the same reference note path, such as `ref/books/example.md`. | Rename or move one PDF before scanning. |
 | `refusing to modify dirty vault files` | Git reports dirty touched paths outside the allowed frontmatter and generated-task checkbox write-back case. | Commit, stash, or clean those paths. |
 | `reference note changed but --write-pdf was not supplied` | Frontmatter or the generated checked task contributes to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf`. |
-| `checked PDF task conflicts` | The generated task says `status: done`, but marker or frontmatter changed `status` to another value from the stored base. | Uncheck the task or set the marker/frontmatter status to `done`. |
+| `checked PDF task conflicts` | The generated task says `status: read`, but marker or frontmatter changed `status` to another value from the stored base. | Uncheck the task or set the marker/frontmatter status to `read`. |
 | `marker/frontmatter conflict` | Marker and frontmatter changed the same field differently, or the note has no stored base snapshot for a safe merge. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
 | `changed during sync; rerun` | The note or PDF changed after planning and before writing. | Rerun after closing or pausing apps that may touch the file. |
 | `scan completed with ... per-PDF failure(s)` | A recursive scan finished reporting or writing valid PDFs, but at least one PDF had a `plan_error` or `write_failure`. | Fix the named PDFs and rerun; review successful writes before assuming the scan wrote nothing. |

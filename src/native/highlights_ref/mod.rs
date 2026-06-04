@@ -36,8 +36,19 @@ const FIELD_PARENT: &str = "parent";
 const FIELD_NOTE_TYPE: &str = "type";
 const FIELD_REF_TYPE: &str = "ref_type";
 const NOTE_TYPE_VALUE: &str = "[[ref]]";
-const ALLOWED_STATUS_VALUES: &[&str] =
-    &["unread", "wip", "done", "abandoned", "legacy"];
+const STATUS_UNREAD: &str = "unread";
+const STATUS_WIP: &str = "wip";
+const STATUS_READ: &str = "read";
+const STATUS_ABANDONED: &str = "abandoned";
+const STATUS_LEGACY: &str = "legacy";
+const DEPRECATED_STATUS_DONE: &str = "done";
+const ALLOWED_STATUS_VALUES: &[&str] = &[
+    STATUS_UNREAD,
+    STATUS_WIP,
+    STATUS_READ,
+    STATUS_ABANDONED,
+    STATUS_LEGACY,
+];
 const MARKER_REQUIRED_KEYS: &[&str] = &[FIELD_STATUS, FIELD_PARENT];
 const COMMAND_MANAGED_FIELDS: &[&str] = &[FIELD_NOTE_TYPE, FIELD_REF_TYPE];
 const MANAGED_BODY_BEGIN: &str = "<!-- highlights:begin -->";
@@ -291,6 +302,7 @@ struct PdfSyncPlan {
     stable_rendered_note: String,
     stable_note_action: &'static str,
     pdf_task_completion: PdfTaskCompletion,
+    status_normalization: StatusNormalization,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +315,19 @@ struct SyncWriteReport {
 struct ScanFailure {
     pdf: PathBuf,
     error: CommandError,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StatusNormalization {
+    marker: bool,
+    frontmatter: bool,
+    base: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedProjection {
+    projection: Projection,
+    status_normalized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -606,16 +631,24 @@ fn plan_pdf_sync(
     options: SyncOptions,
 ) -> Result<PdfSyncPlan> {
     let marker = read_pdf_marker(pdf)?;
-    let marker_projection = parse_marker(&marker.contents)?;
+    let marker_input = parse_marker_with_normalization(&marker.contents)?;
+    let marker_projection = marker_input.projection;
     let note_path = ref_note_path(config, pdf)?;
     validate_note_target(&note_path)?;
     let note = read_note(&note_path)?;
     let pdf_task_line = parse_pdf_task_line(&note.body)?;
-    let frontmatter_projection = note.synced_projection()?;
+    let frontmatter_input = note.synced_projection_with_normalization()?;
+    let frontmatter_projection = frontmatter_input.projection;
     let marker_hash = projection_hash(&marker_projection)?;
     let frontmatter_hash = projection_hash(&frontmatter_projection)?;
     let last_hash = note.marker_hash();
-    let base_projection = note.marker_base_projection()?;
+    let (base_projection, base_status_normalized) =
+        note.marker_base_projection_with_normalization()?;
+    let status_normalization = StatusNormalization {
+        marker: marker_input.status_normalized,
+        frontmatter: frontmatter_input.status_normalized,
+        base: base_status_normalized,
+    };
     let mut resolution = resolve_sync_projection(SyncInputs {
         last_hash: last_hash.as_deref(),
         base_projection: base_projection.as_ref(),
@@ -641,7 +674,8 @@ fn plan_pdf_sync(
     )?;
     let synced_hash = projection_hash(&synced_projection)?;
     let rendered_marker = render_marker(&synced_projection)?;
-    let marker_write_needed = decision.frontmatter_contributed
+    let marker_write_needed = (decision.frontmatter_contributed
+        || status_normalization.marker)
         && normalize_line_endings(&rendered_marker)
             != normalize_line_endings(&marker.contents);
 
@@ -704,6 +738,7 @@ fn plan_pdf_sync(
         stable_rendered_note,
         stable_note_action,
         pdf_task_completion,
+        status_normalization,
     })
 }
 
@@ -850,7 +885,10 @@ fn print_pdf_sync_report(
         pdf_task_completion_label(plan.pdf_task_completion)
     );
     if plan.pdf_task_completion.status_contributed {
-        println!("pdf_task_contribution: status=done");
+        println!("pdf_task_contribution: status=read");
+    }
+    if let Some(label) = status_normalization_label(plan.status_normalization) {
+        println!("status_normalization: {label}");
     }
     if plan.decision.source == SyncSource::AutoMerge {
         println!(
@@ -890,6 +928,27 @@ fn pdf_task_completion_label(completion: PdfTaskCompletion) -> &'static str {
     }
 }
 
+fn status_normalization_label(
+    normalization: StatusNormalization,
+) -> Option<String> {
+    let mut sources = Vec::new();
+    if normalization.marker {
+        sources.push("marker");
+    }
+    if normalization.frontmatter {
+        sources.push("frontmatter");
+    }
+    if normalization.base {
+        sources.push("base");
+    }
+    (!sources.is_empty()).then(|| {
+        format!(
+            "{DEPRECATED_STATUS_DONE}->{STATUS_READ} ({})",
+            sources.join(",")
+        )
+    })
+}
+
 fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     println!("pdf: {}", plan.pdf.display());
     println!("  note: {}", plan.note_path.display());
@@ -909,7 +968,10 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
         pdf_task_completion_label(plan.pdf_task_completion)
     );
     if plan.pdf_task_completion.status_contributed {
-        println!("  pdf_task_contribution: status=done");
+        println!("  pdf_task_contribution: status=read");
+    }
+    if let Some(label) = status_normalization_label(plan.status_normalization) {
+        println!("  status_normalization: {label}");
     }
     println!("  note_action: {}", plan.stable_note_action);
     println!(
@@ -1042,18 +1104,24 @@ fn scan_partial_failure_error(
 
 fn show_marker(config: &Config, pdf: &Path) -> Result<()> {
     let marker = read_pdf_marker(pdf)?;
-    let projection = parse_marker(&marker.contents)?;
+    let marker_input = parse_marker_with_normalization(&marker.contents)?;
     print_config_report("marker", config);
     println!("pdf: {}", pdf.display());
     println!("marker_page: {}", marker.page_number);
     println!("marker_note: {}", marker.note_number);
+    if let Some(label) = status_normalization_label(StatusNormalization {
+        marker: marker_input.status_normalized,
+        ..StatusNormalization::default()
+    }) {
+        println!("status_normalization: {label}");
+    }
     println!("marker_raw:");
     print!("{}", marker.contents);
     if !marker.contents.ends_with('\n') {
         println!();
     }
     println!("marker_rendered:");
-    print!("{}", render_marker(&projection)?);
+    print!("{}", render_marker(&marker_input.projection)?);
     println!("writes: none");
     Ok(())
 }
@@ -2294,7 +2362,7 @@ fn apply_pdf_task_completion_signal(
         checked,
         status_contributed: false,
     };
-    if !checked || projection_status_is_done(&resolution.projection) {
+    if !checked || projection_status_is_read(&resolution.projection) {
         return Ok(completion);
     }
 
@@ -2309,7 +2377,7 @@ fn apply_pdf_task_completion_signal(
 
     resolution.projection.insert(
         FIELD_STATUS.to_string(),
-        MarkerValue::String("done".to_string()),
+        MarkerValue::String(STATUS_READ.to_string()),
     );
     resolution.decision.frontmatter_contributed = true;
     if !resolution.decision.reason.is_empty() {
@@ -2318,7 +2386,7 @@ fn apply_pdf_task_completion_signal(
     resolution
         .decision
         .reason
-        .push_str("checked PDF task set status done");
+        .push_str("checked PDF task set status read");
     completion.status_contributed = true;
     Ok(completion)
 }
@@ -2346,7 +2414,7 @@ fn checked_task_status_conflicts(
     ] {
         let base = base_projection.get(FIELD_STATUS);
         let value = projection.get(FIELD_STATUS);
-        if value != base && !status_value_is_done(value) {
+        if value != base && !status_value_is_read(value) {
             conflicts.push(CheckedTaskStatusConflict {
                 source,
                 base: base.cloned(),
@@ -2372,17 +2440,17 @@ fn checked_task_status_conflict_error(
         ));
     }
     message.push_str(
-        "\nuncheck the PDF task or set the marker/frontmatter status to done",
+        "\nuncheck the PDF task or set the marker/frontmatter status to read",
     );
     CommandError::new(message)
 }
 
-fn projection_status_is_done(projection: &Projection) -> bool {
-    status_value_is_done(projection.get(FIELD_STATUS))
+fn projection_status_is_read(projection: &Projection) -> bool {
+    status_value_is_read(projection.get(FIELD_STATUS))
 }
 
-fn status_value_is_done(value: Option<&MarkerValue>) -> bool {
-    value.and_then(MarkerValue::as_string) == Some("done")
+fn status_value_is_read(value: Option<&MarkerValue>) -> bool {
+    value.and_then(MarkerValue::as_string) == Some(STATUS_READ)
 }
 
 fn resolve_sync_projection(inputs: SyncInputs<'_>) -> Result<SyncResolution> {
@@ -2915,13 +2983,15 @@ impl ParsedNote {
         })
     }
 
-    fn marker_base_projection(&self) -> Result<Option<Projection>> {
+    fn marker_base_projection_with_normalization(
+        &self,
+    ) -> Result<(Option<Projection>, bool)> {
         let Some(entry) = self
             .frontmatter
             .iter()
             .find(|entry| entry.key.as_deref() == Some(FIELD_MARKER_BASE))
         else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let Some(value) = &entry.value else {
             return Err(CommandError::new(format!(
@@ -2933,7 +3003,9 @@ impl ParsedNote {
                 "{FIELD_MARKER_BASE} must be a compact JSON string"
             )));
         };
-        projection_from_snapshot_json(json).map(Some)
+        let mut projection = projection_from_snapshot_json(json)?;
+        let status_normalized = normalize_deprecated_status(&mut projection);
+        Ok((Some(projection), status_normalized))
     }
 
     fn marker_fields(&self) -> BTreeSet<String> {
@@ -2955,7 +3027,9 @@ impl ParsedNote {
         })
     }
 
-    fn synced_projection(&self) -> Result<Projection> {
+    fn synced_projection_with_normalization(
+        &self,
+    ) -> Result<NormalizedProjection> {
         let marker_fields = self.marker_fields();
         let mut projection = Projection::new();
 
@@ -2974,7 +3048,11 @@ impl ParsedNote {
         }
 
         canonicalize_parent(&mut projection, "frontmatter")?;
-        Ok(projection)
+        let status_normalized = normalize_deprecated_status(&mut projection);
+        Ok(NormalizedProjection {
+            projection,
+            status_normalized,
+        })
     }
 
     fn render_with_projection(
@@ -3116,12 +3194,12 @@ impl ParsedNote {
         let Some(rendered_highlights) = rendered_highlights else {
             return rewrite_pdf_task_checkbox(
                 &self.body,
-                projection_status_is_done(projection),
+                projection_status_is_read(projection),
             );
         };
         let replacement = rendered_highlights.content.as_str();
         let body = replace_managed_region(&self.body, replacement)?;
-        rewrite_pdf_task_checkbox(&body, projection_status_is_done(projection))
+        rewrite_pdf_task_checkbox(&body, projection_status_is_read(projection))
     }
 
     fn managed_region(&self) -> Result<Option<&str>> {
@@ -3195,7 +3273,7 @@ fn default_note_body(
     body.push_str("# ");
     body.push_str(&title);
     body.push_str("\n\n");
-    if projection_status_is_done(projection) {
+    if projection_status_is_read(projection) {
         body.push_str("- [x] #task [[");
     } else {
         body.push_str("- [ ] #task [[");
@@ -3605,6 +3683,12 @@ fn atomic_save_pdf(path: &Path, document: &mut Document) -> Result<()> {
 }
 
 fn parse_marker(contents: &str) -> Result<Projection> {
+    Ok(parse_marker_with_normalization(contents)?.projection)
+}
+
+fn parse_marker_with_normalization(
+    contents: &str,
+) -> Result<NormalizedProjection> {
     let mut projection = Projection::new();
     for (index, line) in contents.lines().enumerate() {
         let line_number = index + 1;
@@ -3654,8 +3738,25 @@ fn parse_marker(contents: &str) -> Result<Projection> {
     }
 
     canonicalize_parent(&mut projection, "marker")?;
+    let status_normalized = normalize_deprecated_status(&mut projection);
     validate_required_marker_keys(&projection, "marker")?;
-    Ok(projection)
+    Ok(NormalizedProjection {
+        projection,
+        status_normalized,
+    })
+}
+
+fn normalize_deprecated_status(projection: &mut Projection) -> bool {
+    let Some(MarkerValue::String(status)) = projection.get_mut(FIELD_STATUS)
+    else {
+        return false;
+    };
+    if status == DEPRECATED_STATUS_DONE {
+        *status = STATUS_READ.to_string();
+        true
+    } else {
+        false
+    }
 }
 
 fn validate_required_marker_keys(
@@ -4436,6 +4537,48 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_done_status_normalizes_to_read_for_synced_inputs() {
+        let marker = super::parse_marker_with_normalization(
+            "- status: done\n- parent: obsidian\n",
+        )
+        .expect("parse deprecated marker status");
+        assert!(marker.status_normalized);
+        assert_eq!(
+            marker.projection.get("status"),
+            Some(&string_value("read"))
+        );
+
+        let note = parse_note(
+            "\
+---
+status: done
+parent: obsidian
+highlights_marker_base: '{\"parent\":\"obsidian\",\"status\":\"done\"}'
+---
+
+Body
+",
+        );
+        let frontmatter = note
+            .synced_projection_with_normalization()
+            .expect("normalize frontmatter status");
+        assert!(frontmatter.status_normalized);
+        assert_eq!(
+            frontmatter.projection.get("status"),
+            Some(&string_value("read"))
+        );
+
+        let (base, base_status_normalized) = note
+            .marker_base_projection_with_normalization()
+            .expect("normalize base status");
+        assert!(base_status_normalized);
+        assert_eq!(
+            base.expect("base projection").get("status"),
+            Some(&string_value("read"))
+        );
+    }
+
+    #[test]
     fn projection_three_way_merge_handles_compatible_changes() {
         let base = test_projection(vec![
             ("status", string_value("wip")),
@@ -4446,7 +4589,7 @@ mod tests {
         let marker_only = super::merge_projection_changes(
             &base,
             &test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("Old")),
             ]),
@@ -4455,7 +4598,7 @@ mod tests {
         assert!(marker_only.conflicts.is_empty());
         assert_eq!(
             marker_only.projection.get("status"),
-            Some(&string_value("done"))
+            Some(&string_value("read"))
         );
         assert!(marker_only.marker_contributed);
         assert!(!marker_only.frontmatter_contributed);
@@ -4480,12 +4623,12 @@ mod tests {
         let same_value = super::merge_projection_changes(
             &base,
             &test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("Old")),
             ]),
             &test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("Old")),
             ]),
@@ -4493,7 +4636,7 @@ mod tests {
         assert!(same_value.conflicts.is_empty());
         assert_eq!(
             same_value.projection.get("status"),
-            Some(&string_value("done"))
+            Some(&string_value("read"))
         );
         assert!(same_value.marker_contributed);
         assert!(same_value.frontmatter_contributed);
@@ -4501,7 +4644,7 @@ mod tests {
         let non_overlapping = super::merge_projection_changes(
             &base,
             &test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("Old")),
             ]),
@@ -4515,7 +4658,7 @@ mod tests {
         assert_eq!(
             non_overlapping.projection,
             test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("New")),
             ])
@@ -4554,7 +4697,7 @@ mod tests {
         let same_key_different_value = super::merge_projection_changes(
             &base,
             &test_projection(vec![
-                ("status", string_value("done")),
+                ("status", string_value("read")),
                 ("parent", string_value("[[obsidian]]")),
                 ("title", string_value("Old")),
             ]),
@@ -4657,7 +4800,7 @@ mod tests {
         ));
 
         let base_note = format!("---\nstatus: wip\n---\n{base_body}");
-        let current_note = format!("---\nstatus: done\n---\n{checked_body}");
+        let current_note = format!("---\nstatus: read\n---\n{checked_body}");
         assert!(super::changes_confined_to_frontmatter_or_pdf_task_checkbox(
             &base_note,
             &current_note
@@ -5019,8 +5162,9 @@ Body
 ",
         );
         let projection = note
-            .synced_projection()
-            .expect("extract frontmatter projection");
+            .synced_projection_with_normalization()
+            .expect("extract frontmatter projection")
+            .projection;
         assert_eq!(
             projection.get("parent"),
             Some(&MarkerValue::String("[[obsidian]]".to_string()))
@@ -5059,7 +5203,7 @@ Body
 ",
         );
         let frontmatter_error = note
-            .synced_projection()
+            .synced_projection_with_normalization()
             .expect_err("list parent frontmatter should fail");
         assert!(
             frontmatter_error
@@ -5103,6 +5247,13 @@ Body
 
     #[test]
     fn status_validation_rejects_unsupported_and_non_scalar_values() {
+        let canonical = parse_marker("- status: read\n- parent: obsidian\n")
+            .expect("read status should be supported");
+        assert_eq!(
+            canonical.get("status"),
+            Some(&MarkerValue::String("read".to_string()))
+        );
+
         let unsupported =
             parse_marker("- status: queued\n- parent: obsidian\n")
                 .expect_err("unsupported status should fail");
@@ -5194,8 +5345,9 @@ Body
         );
 
         let projection = note
-            .synced_projection()
-            .expect("extract frontmatter projection");
+            .synced_projection_with_normalization()
+            .expect("extract frontmatter projection")
+            .projection;
         assert!(!projection.contains_key("parent"));
         assert!(!projection.contains_key("type"));
         assert_eq!(
