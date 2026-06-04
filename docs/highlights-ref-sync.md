@@ -382,14 +382,14 @@ Manual content outside those markers must be preserved. User edits inside the
 generated region may be overwritten.
 
 New generated notes include a title, a PDF wikilink Obsidian task line with
-the stable `^task` block ID, and `## Highlights`.
+`[p::2]` priority and the stable `^task` block ID, and `## Highlights`.
 Existing notes must already contain the managed begin/end markers; otherwise
 `sync` fails instead of guessing where generated content belongs.
 
 The generated task line is a completion affordance:
 
 ```md
-- [ ] #task [[lib/books/example.pdf]] ^task
+- [ ] #task [[lib/books/example.pdf]] [p::2] ^task
 ```
 
 Checking it with `[x]` or `[X]` means `status: read`. Unchecking it does not

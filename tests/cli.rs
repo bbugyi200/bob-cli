@@ -1602,8 +1602,9 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
         "{contents}"
     );
     assert!(
-        contents
-            .contains("- [ ] #task [[lib/systems-performance.pdf]] ^task\n"),
+        contents.contains(
+            "- [ ] #task [[lib/systems-performance.pdf]] [p::2] ^task\n"
+        ),
         "{contents}"
     );
     assert!(
@@ -2681,7 +2682,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
     let contents = fs::read_to_string(&note).expect("read updated ref note");
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
-        contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        contents.contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"),
         "{contents}"
     );
 }
@@ -2947,7 +2948,8 @@ fn highlights_ref_deprecated_done_status_migrates_to_read_with_pdf_write() {
     let migrated_note = fs::read_to_string(&note).expect("read migrated note");
     assert!(migrated_note.contains("status: read\n"), "{migrated_note}");
     assert!(
-        migrated_note.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        migrated_note
+            .contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"),
         "{migrated_note}"
     );
     assert!(
@@ -3148,7 +3150,8 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
         "{note_after_write}"
     );
     assert!(
-        note_after_write.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        note_after_write
+            .contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"),
         "{note_after_write}"
     );
     assert!(
@@ -3220,7 +3223,7 @@ fn highlights_ref_task_checked_dirty_tracked_note_is_allowed() {
     let contents = fs::read_to_string(&note).expect("read synced note");
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
-        contents.contains("- [x] #task [[lib/example.pdf]] ^task\n"),
+        contents.contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"),
         "{contents}"
     );
 }
@@ -3605,7 +3608,7 @@ Note: Keep a standalone observation after the marker.
     assert!(contents.contains("# Systems Performance\n"), "{contents}");
     assert!(
         contents.contains(
-            "- [ ] #task [[lib/books/systems-performance.pdf]] ^task\n"
+            "- [ ] #task [[lib/books/systems-performance.pdf]] [p::2] ^task\n"
         ),
         "{contents}"
     );

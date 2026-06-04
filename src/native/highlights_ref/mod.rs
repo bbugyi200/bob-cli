@@ -54,6 +54,7 @@ const COMMAND_MANAGED_FIELDS: &[&str] = &[FIELD_NOTE_TYPE, FIELD_REF_TYPE];
 const MANAGED_BODY_BEGIN: &str = "<!-- highlights:begin -->";
 const MANAGED_BODY_END: &str = "<!-- highlights:end -->";
 const PDF_TASK_BLOCK_ID: &str = "^task";
+const PDF_TASK_PRIORITY: &str = "[p::2]";
 const PDF_TASK_TAG: &str = "#task";
 const PIPELINE_VERSION: &str = "highlights-ref-mvp-3";
 const REMOVED_HIGHLIGHTS_HEADING: &str = "### Removed highlights";
@@ -2282,7 +2283,7 @@ fn parse_pdf_task_line(body: &str) -> Result<PdfTaskLineState> {
 
 fn malformed_pdf_task_line_error(line_index: usize) -> CommandError {
     CommandError::new(format!(
-        "generated PDF task line on line {} is malformed; expected '- [ ] #task [[...pdf]] ^task' or '- [x] #task [[...pdf]] ^task'",
+        "generated PDF task line on line {} is malformed; expected '- [ ] #task [[...pdf]] [p::2] ^task' or '- [x] #task [[...pdf]] [p::2] ^task'",
         line_index + 1
     ))
 }
@@ -3295,7 +3296,11 @@ fn default_note_body(
         body.push_str("- [ ] #task [[");
     }
     body.push_str(source_pdf);
-    body.push_str("]] ^task\n\n");
+    body.push_str("]] ");
+    body.push_str(PDF_TASK_PRIORITY);
+    body.push(' ');
+    body.push_str(PDF_TASK_BLOCK_ID);
+    body.push_str("\n\n");
     body.push_str("## Highlights\n\n");
     body.push_str(MANAGED_BODY_BEGIN);
     body.push_str("\n\n");
@@ -4736,7 +4741,7 @@ Body
         );
 
         let unchecked = super::parse_pdf_task_line(
-            "# Example\n\n- [ ] #task [[lib/books/example.pdf]] ^task\n",
+            "# Example\n\n- [ ] #task [[lib/books/example.pdf]] [p::2] ^task\n",
         )
         .expect("parse unchecked task");
         match unchecked {
@@ -4748,11 +4753,20 @@ Body
         }
 
         let checked = super::parse_pdf_task_line(
-            "- [X] #task [[lib/books/example.PDF|Example]] ^task\n",
+            "- [X] #task [[lib/books/example.PDF|Example]] [p::2] ^task\n",
         )
         .expect("parse checked task");
         match checked {
             super::PdfTaskLineState::Present(task) => assert!(task.checked),
+            super::PdfTaskLineState::Missing => panic!("expected task line"),
+        }
+
+        let legacy_without_priority = super::parse_pdf_task_line(
+            "- [ ] #task [[lib/books/example.pdf]] ^task\n",
+        )
+        .expect("parse legacy task without priority");
+        match legacy_without_priority {
+            super::PdfTaskLineState::Present(task) => assert!(!task.checked),
             super::PdfTaskLineState::Missing => panic!("expected task line"),
         }
     }
@@ -4808,6 +4822,23 @@ Body
         let rewritten = super::rewrite_pdf_task_checkbox(base_body, true)
             .expect("rewrite task checkbox");
         assert!(rewritten.contains("- [x] #task [[lib/example.pdf]] ^task\n"));
+
+        let prioritized_body = "\
+# Example
+
+- [ ] #task [[lib/example.pdf]] [p::2] ^task
+
+## Highlights
+
+<!-- highlights:begin -->
+
+<!-- highlights:end -->
+";
+        let prioritized_rewritten =
+            super::rewrite_pdf_task_checkbox(prioritized_body, true)
+                .expect("rewrite prioritized task checkbox");
+        assert!(prioritized_rewritten
+            .contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"));
 
         let unrelated_body = checked_body.replace("## Highlights", "Manual");
         assert!(!super::bodies_differ_only_by_pdf_task_checkbox(
