@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-04 14:44:24
-status: wip
+status: done
 prompt: sdd/prompts/202606/rename_cronjob_to_nightly.md
 ---
 # Plan: Rename `bob cronjob` to `bob nightly`

@@ -192,10 +192,10 @@ fn highlights_ref_subcommand_help_works() {
 fn all_top_level_subcommand_help_is_safe_and_plain() {
     let cases: &[(&[&str], &str)] = &[
         (&["bulk-git-commit", "--help"], "usage: bob bulk-git-commit"),
-        (&["cronjob", "--help"], "usage: bob cronjob"),
         (&["dataview", "--help"], "bob dataview"),
         (&["highlights", "--help"], "Usage: bob highlights"),
         (&["move-done-tasks", "--help"], "usage: bob move-done-tasks"),
+        (&["nightly", "--help"], "usage: bob nightly"),
         (&["notify", "--help"], "Notify me when"),
         (&["pomodoro", "--help"], "usage: bob pomodoro"),
         (&["tmux-pomodoro", "--help"], "usage: bob tmux-pomodoro"),
@@ -223,7 +223,6 @@ fn public_help_surfaces_do_not_list_long_only_options() {
     let bob_cases: &[(&[&str], &str)] = &[
         (&["--help"], "bob --help"),
         (&["bulk-git-commit", "--help"], "bob bulk-git-commit --help"),
-        (&["cronjob", "--help"], "bob cronjob --help"),
         (&["dataview", "--help"], "bob dataview --help"),
         (&["highlights", "--help"], "bob highlights --help"),
         (
@@ -243,6 +242,7 @@ fn public_help_surfaces_do_not_list_long_only_options() {
             "bob highlights sync --help",
         ),
         (&["move-done-tasks", "--help"], "bob move-done-tasks --help"),
+        (&["nightly", "--help"], "bob nightly --help"),
         (&["notify", "--help"], "bob notify --help"),
         (&["pomodoro", "--help"], "bob pomodoro --help"),
         (&["tmux-pomodoro", "--help"], "bob tmux-pomodoro --help"),
@@ -401,8 +401,8 @@ fn script_fallback_bob_sync_help_exits_before_work() {
 }
 
 #[test]
-fn cronjob_help_exits_before_operational_work() {
-    let temp = TempDir::new("bob-cli-cronjob-help");
+fn nightly_help_exits_before_operational_work() {
+    let temp = TempDir::new("bob-cli-nightly-help");
     let stub_bin = temp.path().join("bin");
     let vault = temp.path().join("vault");
     let log = temp.path().join("commands.log");
@@ -418,7 +418,7 @@ fn cronjob_help_exits_before_operational_work() {
     );
 
     let output = bob_command()
-        .arg("cronjob")
+        .arg("nightly")
         .arg("--help")
         .env("BOB_DIR", &vault)
         .env("BOB_SYNC_LOCK_FILE", temp.path().join("bob_sync.lock"))
@@ -427,17 +427,17 @@ fn cronjob_help_exits_before_operational_work() {
         .env("STUB_LOG", &log)
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
-        .expect("run bob cronjob --help");
+        .expect("run bob nightly --help");
 
     assert_success(&output);
     assert!(
-        stdout(&output).contains("usage: bob cronjob"),
-        "expected cronjob help:\n{}",
+        stdout(&output).contains("usage: bob nightly"),
+        "expected nightly help:\n{}",
         format_output(&output)
     );
     assert!(
         !log.exists(),
-        "bob cronjob --help must not run ob or git:\n{}",
+        "bob nightly --help must not run ob or git:\n{}",
         fs::read_to_string(&log).unwrap_or_default()
     );
     assert_stdout_has_no_ansi(&output);
@@ -4901,7 +4901,7 @@ fn bulk_git_commit_commits_and_pushes_without_running_ob() {
 
     // An `ob` stub that fails loudly if invoked: standalone
     // `bob bulk-git-commit` must not touch Obsidian (that moved up to
-    // `bob cronjob`).
+    // `bob nightly`).
     write_executable(
         &stub_bin.join("ob"),
         r#"#!/bin/sh
@@ -5025,7 +5025,7 @@ fn renamed_old_top_level_commands_are_unknown() {
         assert_success(&output);
     }
 
-    for command in ["collect-done", "highlights-ref", "sync"] {
+    for command in ["collect-done", "cronjob", "highlights-ref", "sync"] {
         let output = bob_command()
             .arg(command)
             .arg("--help")
@@ -5056,10 +5056,10 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
 
     let order = [
         "bulk-git-commit",
-        "cronjob",
         "dataview",
         "highlights",
         "move-done-tasks",
+        "nightly",
         "notify",
         "pomodoro",
         "tmux-pomodoro",
@@ -5083,8 +5083,13 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
             && help.contains("bob dataview --source '#project'")
             && help.contains("bob highlights scan --dry-run")
             && help.contains("bob move-done-tasks --threshold 10")
+            && help.contains("bob nightly")
             && help.contains("bob pomodoro"),
         "expected an Examples section:\n{help}"
+    );
+    assert!(
+        !help.contains("cronjob"),
+        "top-level help should not list the old cronjob spelling:\n{help}"
     );
     assert!(
         !help.contains("highlights-ref"),
@@ -5102,8 +5107,8 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
 }
 
 #[test]
-fn cronjob_runs_shared_sync_once_then_wrapped_steps_in_order() {
-    let temp = TempDir::new("bob-cli-cronjob-happy");
+fn nightly_runs_shared_sync_once_then_wrapped_steps_in_order() {
+    let temp = TempDir::new("bob-cli-nightly-happy");
     let stub_bin = temp.path().join("bin");
     let (vault, remote) = init_git_vault_with_remote(&temp);
     let home = temp.path().join("home");
@@ -5139,7 +5144,7 @@ exit 64
     );
 
     let output = bob_command()
-        .arg("cronjob")
+        .arg("nightly")
         .env("BOB_DIR", &vault)
         .env("BOB_NOW", "2026-06-02")
         .env(
@@ -5156,7 +5161,7 @@ exit 64
         .env("STUB_LOG", &log)
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
-        .expect("run bob cronjob");
+        .expect("run bob nightly");
 
     assert_success(&output);
     let out = stdout(&output);
@@ -5224,22 +5229,22 @@ exit 64
 
     // The summary reports every step passing, in plain text.
     assert!(
-        out.contains("bob cronjob")
+        out.contains("bob nightly")
             && out.contains("Obsidian sync (shared, runs once)")
             && out.contains("move-done-tasks")
             && out.contains("All steps passed"),
-        "expected a structured cronjob summary:\n{}",
+        "expected a structured nightly summary:\n{}",
         format_output(&output)
     );
     assert!(
         !output.stdout.contains(&0x1b),
-        "piped cronjob output must not contain ANSI escape codes:\n{out}"
+        "piped nightly output must not contain ANSI escape codes:\n{out}"
     );
 }
 
 #[test]
-fn cronjob_failing_shared_sync_aborts_before_wrapped_steps() {
-    let temp = TempDir::new("bob-cli-cronjob-sync-fail");
+fn nightly_failing_shared_sync_aborts_before_wrapped_steps() {
+    let temp = TempDir::new("bob-cli-nightly-sync-fail");
     let stub_bin = temp.path().join("bin");
     let (vault, _remote) = init_git_vault_with_remote(&temp);
     let home = temp.path().join("home");
@@ -5263,14 +5268,14 @@ exit 64
     );
 
     let output = bob_command()
-        .arg("cronjob")
+        .arg("nightly")
         .env("BOB_DIR", &vault)
         .env("BOB_SYNC_LOCK_FILE", temp.path().join("bob_sync.lock"))
         .env("HOME", &home)
         .env("OB_COMMAND", stub_bin.join("ob"))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
-        .expect("run bob cronjob with failing sync");
+        .expect("run bob nightly with failing sync");
 
     assert_eq!(
         output.status.code(),
@@ -5306,8 +5311,8 @@ exit 64
 }
 
 #[test]
-fn cronjob_failed_step_still_runs_later_steps_and_exits_nonzero() {
-    let temp = TempDir::new("bob-cli-cronjob-step-fail");
+fn nightly_failed_step_still_runs_later_steps_and_exits_nonzero() {
+    let temp = TempDir::new("bob-cli-nightly-step-fail");
     let stub_bin = temp.path().join("bin");
     let (vault, remote) = init_git_vault_with_remote(&temp);
     let home = temp.path().join("home");
@@ -5326,7 +5331,7 @@ fn cronjob_failed_step_still_runs_later_steps_and_exits_nonzero() {
     write_successful_ob_stub(&stub_bin);
 
     let output = bob_command()
-        .arg("cronjob")
+        .arg("nightly")
         .env("BOB_DIR", &vault)
         .env("BOB_SYNC_COMMIT_MESSAGE", "legacy fallback commit")
         .env("BOB_SYNC_LOCK_FILE", temp.path().join("bob_sync.lock"))
@@ -5334,7 +5339,7 @@ fn cronjob_failed_step_still_runs_later_steps_and_exits_nonzero() {
         .env("OB_COMMAND", stub_bin.join("ob"))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
-        .expect("run bob cronjob with a failing wrapped step");
+        .expect("run bob nightly with a failing wrapped step");
 
     assert_eq!(
         output.status.code(),

@@ -37,12 +37,6 @@ const SUBCOMMANDS: &[Subcommand] = &[
         native_command: NativeCommand::BulkGitCommit,
     },
     Subcommand {
-        name: "cronjob",
-        script_command: None,
-        about: "Run the nightly Obsidian sync and maintenance steps",
-        native_command: NativeCommand::Cronjob,
-    },
-    Subcommand {
         name: "dataview",
         script_command: None,
         about: "Run Dataview queries against the Bob vault",
@@ -59,6 +53,12 @@ const SUBCOMMANDS: &[Subcommand] = &[
         script_command: None,
         about: "Move done and canceled tasks and maintain done links",
         native_command: NativeCommand::MoveDoneTasks,
+    },
+    Subcommand {
+        name: "nightly",
+        script_command: None,
+        about: "Run the nightly Obsidian sync and maintenance steps",
+        native_command: NativeCommand::Nightly,
     },
     Subcommand {
         name: "notify",
@@ -214,13 +214,13 @@ const HELP_TEMPLATE: &str = "\
 const AFTER_HELP: &str = "\
 Examples:
   bob bulk-git-commit             Commit and push Bob vault Git changes
-  bob cronjob                    Run the nightly sync and maintenance steps
   bob dataview --source '#project'
                                  Print matching note paths
   bob highlights scan --dry-run
                                  Preview Highlights reference note sync
   bob move-done-tasks --threshold 10
                                  Move tasks and maintain done links
+  bob nightly                    Run the nightly sync and maintenance steps
   bob pomodoro                   Show today's Pomodoro status
 
 Run 'bob <command> --help' for more information on a command.";

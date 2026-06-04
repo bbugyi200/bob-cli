@@ -1,4 +1,4 @@
-//! `bob cronjob` — the single nightly entry point.
+//! `bob nightly` — the single nightly entry point.
 //!
 //! Performs the once-nightly Obsidian sync up front (the shared gate), then
 //! runs a sequence of wrapped steps (`move-done-tasks`, then
@@ -52,8 +52,8 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
             return 0;
         }
         ParseResult::Error(message) => {
-            eprintln!("bob cronjob: {message}");
-            eprintln!("Try 'bob cronjob --help' for more information.");
+            eprintln!("bob nightly: {message}");
+            eprintln!("Try 'bob nightly --help' for more information.");
             return 2;
         }
     }
@@ -124,7 +124,7 @@ enum ParseResult {
 fn print_help() {
     println!(
         "\
-usage: bob cronjob
+usage: bob nightly
 
 Run the nightly Bob maintenance path. The command acquires the shared lock,
 runs the shared `ob sync --path <vault>` gate once, then runs
@@ -207,7 +207,7 @@ fn run_sync_gate(
 fn print_header(styler: &Styler, vault: &Path) {
     let rule = styler.cyan(&"\u{2501}".repeat(RULE_WIDTH));
     println!("{rule}");
-    println!("  {} \u{b7} {}", styler.bold("bob cronjob"), timestamp());
+    println!("  {} \u{b7} {}", styler.bold("bob nightly"), timestamp());
     println!(
         "  Nightly maintenance for the Bob Obsidian vault \u{2014} {}",
         vault.display()

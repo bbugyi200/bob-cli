@@ -1,10 +1,10 @@
 use std::ffi::OsString;
 
 mod collect_done;
-mod cronjob;
 mod dataview;
 mod env;
 mod highlights_ref;
+mod nightly;
 mod notify;
 mod ob;
 mod pomodoro;
@@ -13,12 +13,12 @@ mod sync;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeCommand {
     BulkGitCommit,
-    Cronjob,
     Dataview,
     Highlights,
     MoveDoneTasks,
-    Pomodoro,
+    Nightly,
     Notify,
+    Pomodoro,
     TmuxPomodoro,
 }
 
@@ -37,12 +37,12 @@ pub(crate) fn command_for_script(
 pub(crate) fn run(command: NativeCommand, args: Vec<OsString>) -> i32 {
     match command {
         NativeCommand::BulkGitCommit => sync::run(args),
-        NativeCommand::Cronjob => cronjob::run(args),
         NativeCommand::Dataview => dataview::run(args),
         NativeCommand::Highlights => highlights_ref::run(args),
         NativeCommand::MoveDoneTasks => collect_done::run(args),
-        NativeCommand::Pomodoro => pomodoro::run(args),
+        NativeCommand::Nightly => nightly::run(args),
         NativeCommand::Notify => notify::run(args),
+        NativeCommand::Pomodoro => pomodoro::run(args),
         NativeCommand::TmuxPomodoro => pomodoro::run_tmux(args),
     }
 }

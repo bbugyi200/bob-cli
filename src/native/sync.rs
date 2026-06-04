@@ -46,7 +46,7 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
 /// Stage, commit (if anything changed), and push the vault.
 ///
 /// This does **not** acquire the run lock or run `ob sync`; the caller owns
-/// both. `cronjob` calls this directly while holding the shared lock, and the
+/// both. `nightly` calls this directly while holding the shared lock, and the
 /// standalone `run()` wraps it after acquiring the lock itself.
 pub(crate) fn commit_and_push_vault(
     bob_dir: &Path,

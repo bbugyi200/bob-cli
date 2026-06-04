@@ -267,7 +267,7 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
 
 /// Run the archive collection against the vault and commit/push the result.
 ///
-/// This does **not** run `ob sync`; under `cronjob` the shared sync gate runs
+/// This does **not** run `ob sync`; under `nightly` the shared sync gate runs
 /// once up front. The standalone `run()` wraps this directly.
 pub(crate) fn run_collection(threshold: usize, child_env: &ChildEnv) -> i32 {
     let vault = bob_env::bob_dir();

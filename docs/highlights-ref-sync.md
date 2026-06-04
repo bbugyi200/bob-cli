@@ -281,7 +281,7 @@ Reference note writes are atomic temporary-file renames and are skipped when the
 rendered note is byte-identical to the existing file.
 
 `bob highlights` does not run `ob sync` before or after writes. The existing
-`bob cronjob` sync gate owns `ob sync` orchestration, while this command only
+`bob nightly` sync gate owns `ob sync` orchestration, while this command only
 reports whether `ob` is available through `doctor`.
 
 ## Generated Body Contract

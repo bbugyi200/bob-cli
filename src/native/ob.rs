@@ -1,4 +1,4 @@
-//! Shared Obsidian (`ob`) and Git plumbing used by the nightly `cronjob`
+//! Shared Obsidian (`ob`) and Git plumbing used by the `nightly`
 //! orchestrator and the wrapped `bulk-git-commit` / `move-done-tasks`
 //! commands.
 //!
@@ -12,7 +12,7 @@
 //!    and the `git -C <vault>` command builder used for commits and pushes.
 //!
 //! It also owns the exclusive run lock so the standalone `bulk-git-commit`
-//! command and the `cronjob` orchestrator share a single mutual-exclusion gate.
+//! command and the `nightly` orchestrator share a single mutual-exclusion gate.
 
 use std::{
     env,
@@ -242,7 +242,7 @@ env -0
         .collect()
 }
 
-/// Acquire the exclusive run lock shared by `bulk-git-commit` and `cronjob`.
+/// Acquire the exclusive run lock shared by `bulk-git-commit` and `nightly`.
 ///
 /// Returns `Ok(Some(file))` on success (hold the guard for the duration of the
 /// run), `Err(0)` when another run already holds the lock, and `Err(1)` on an

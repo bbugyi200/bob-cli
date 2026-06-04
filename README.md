@@ -30,10 +30,10 @@ root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" --help
 "$root/bin/bob" bulk-git-commit --help
-"$root/bin/bob" cronjob --help
 "$root/bin/bob" dataview --help
 "$root/bin/bob" highlights --help
 "$root/bin/bob" move-done-tasks --help
+"$root/bin/bob" nightly --help
 "$root/bin/bob" notify --help
 "$root/bin/bob" pomodoro --help
 "$root/bin/bob" tmux-pomodoro --help
@@ -50,13 +50,13 @@ bob bulk-git-commit
 ```
 
 Stages all Bob vault changes, commits them when anything changed, and pushes via
-Git. This command does not run `ob sync`; use `bob cronjob` for the nightly path
+Git. This command does not run `ob sync`; use `bob nightly` for the nightly path
 that syncs Obsidian before maintenance steps. `bob bulk-git-commit` mutates the
 vault repository and should only be run when Git remotes and SSH credentials are
 ready.
 
 ```bash
-bob cronjob
+bob nightly
 ```
 
 Runs the nightly maintenance sequence. It performs one shared
@@ -119,7 +119,7 @@ because the intended block is ambiguous. Only explicit `^block-id` targets can
 be rewritten; heading links and tasks without block ids do not have a stable
 target to repair.
 
-The command itself does not run `ob sync`; `bob cronjob` runs the shared
+The command itself does not run `ob sync`; `bob nightly` runs the shared
 Obsidian sync gate before invoking it. In a Git worktree, the command refuses to
 modify source, archive, or link-repair candidates that already have uncommitted
 changes, stages only the files it touches, commits with a
@@ -215,7 +215,7 @@ useful for validating or forcing the embedded script fallback with
 
 The remaining runtime dependencies are:
 
-- `ob` from obsidian-headless for the shared `bob cronjob` Obsidian sync gate
+- `ob` from obsidian-headless for the shared `bob nightly` Obsidian sync gate
 - `obsidian` CLI plus a running desktop Obsidian vault with the Dataview plugin
   only when using `bob dataview --engine obsidian`
 - `git` and `ssh` for `bob bulk-git-commit` and for `bob move-done-tasks`
@@ -256,11 +256,11 @@ configured.
 prefix such as `date --utc`, or a timestamp in the same formats accepted by
 `BOB_NOW`.
 
-`OB_COMMAND` overrides the `ob` executable used by the shared `bob cronjob`
+`OB_COMMAND` overrides the `ob` executable used by the shared `bob nightly`
 Obsidian sync gate.
 
 `BOB_BULK_GIT_COMMIT_LOCK_FILE` overrides the lock path used by
-`bob bulk-git-commit` and `bob cronjob`.
+`bob bulk-git-commit` and `bob nightly`.
 
 `BOB_BULK_GIT_COMMIT_MESSAGE` overrides the commit message used by
 `bob bulk-git-commit`.
@@ -307,10 +307,10 @@ root="$(mktemp -d)"
 cargo install --path . --locked --root "$root"
 "$root/bin/bob" --help
 "$root/bin/bob" bulk-git-commit --help
-"$root/bin/bob" cronjob --help
 "$root/bin/bob" dataview --help
 "$root/bin/bob" highlights --help
 "$root/bin/bob" move-done-tasks --help
+"$root/bin/bob" nightly --help
 "$root/bin/bob" notify --help
 "$root/bin/bob" pomodoro --help
 "$root/bin/bob" tmux-pomodoro --help
