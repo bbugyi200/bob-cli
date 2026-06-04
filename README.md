@@ -148,13 +148,14 @@ report unless `--prefer marker` or `--prefer frontmatter` is supplied.
 recursively processes PDFs under the configured library with collision and
 dirty-target preflights, while `doctor` checks vault paths, sidecars, marker
 readability, Git state, and optional `ob` availability without writing files.
-Marker notes must include `status` and `parent`; `parent` may be a bare note
-target such as `obsidian` or an existing wikilink. `status` must be one of
-`unread`, `wip`, `done`, `abandoned`, or `legacy`. Existing migrated notes may
-also carry `legacy_status` frontmatter to preserve the previous value; it is not
-a standard marker-synced field. Generated reference notes always include
-`type: "[[ref]]"` and include command-managed `ref_type` when it can be derived
-from the first library path component.
+Marker notes must include `status` and `parent`; marker `parent` must be a bare
+note target such as `obsidian`, while generated reference-note frontmatter
+renders it as an Obsidian wikilink. `status` must be one of `unread`, `wip`,
+`done`, `abandoned`, or `legacy`. Existing migrated notes may also carry
+`legacy_status` frontmatter to preserve the previous value; it is not a standard
+marker-synced field. Generated reference notes always include `type: "[[ref]]"`
+and include command-managed `ref_type` when it can be derived from the first
+library path component.
 
 For `lib/books/foo.pdf`, `sync` discovers `lib/books/foo.md` first and can
 parse simple `foo.textbundle/text.md` or `text.markdown` sidecars. Highlights,

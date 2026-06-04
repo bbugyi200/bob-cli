@@ -573,7 +573,7 @@ fn plan_pdf_sync(
         decision.source.as_str(),
     )?;
     let synced_hash = projection_hash(&synced_projection)?;
-    let rendered_marker = render_marker(&synced_projection);
+    let rendered_marker = render_marker(&synced_projection)?;
     let marker_write_needed = decision.frontmatter_contributed
         && normalize_line_endings(&rendered_marker)
             != normalize_line_endings(&marker.contents);
@@ -929,7 +929,7 @@ fn show_marker(config: &Config, pdf: &Path) -> Result<()> {
         println!();
     }
     println!("marker_rendered:");
-    print!("{}", render_marker(&projection));
+    print!("{}", render_marker(&projection)?);
     println!("writes: none");
     Ok(())
 }
@@ -1444,6 +1444,24 @@ fn command_output(output: &Output) -> String {
 fn is_wikilink(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with("[[") && trimmed.ends_with("]]")
+}
+
+fn simple_wikilink_target(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with("[[") && trimmed.ends_with("]]")) {
+        return None;
+    }
+    let target = &trimmed[2..trimmed.len() - 2];
+    if target.trim().is_empty()
+        || target.trim() != target
+        || target.contains('|')
+        || target.contains("#^")
+        || target.contains("[[")
+        || target.contains("]]")
+    {
+        return None;
+    }
+    Some(target)
 }
 
 fn canonicalize_parent(
@@ -2672,11 +2690,28 @@ impl MarkerValue {
             MarkerValue::Null => "null".to_string(),
             MarkerValue::Bool(value) => value.to_string(),
             MarkerValue::Number(value) => value.clone(),
-            MarkerValue::String(value) => render_plain_or_quoted(value),
+            MarkerValue::String(value) => render_marker_scalar_string(value),
             MarkerValue::List(values) => {
                 let values = values
                     .iter()
-                    .map(MarkerValue::as_marker_value)
+                    .map(MarkerValue::as_marker_list_value)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{values}]")
+            }
+        }
+    }
+
+    fn as_marker_list_value(&self) -> String {
+        match self {
+            MarkerValue::Null => "null".to_string(),
+            MarkerValue::Bool(value) => value.to_string(),
+            MarkerValue::Number(value) => value.clone(),
+            MarkerValue::String(value) => render_marker_list_string(value),
+            MarkerValue::List(values) => {
+                let values = values
+                    .iter()
+                    .map(MarkerValue::as_marker_list_value)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{values}]")
@@ -3492,7 +3527,11 @@ fn parse_marker(contents: &str) -> Result<Projection> {
                 "duplicate marker key on line {line_number}: {key}"
             )));
         }
-        projection.insert(key, parse_value(value));
+        let parsed_value = parse_value(value);
+        if key == FIELD_PARENT {
+            validate_marker_parent_value(value, line_number, &parsed_value)?;
+        }
+        projection.insert(key, parsed_value);
     }
 
     canonicalize_parent(&mut projection, "marker")?;
@@ -3540,7 +3579,7 @@ fn validate_status_value(projection: &Projection, source: &str) -> Result<()> {
     )))
 }
 
-fn render_marker(projection: &Projection) -> String {
+fn render_marker(projection: &Projection) -> Result<String> {
     let mut rendered = String::new();
     for key in ordered_projection_keys(projection) {
         let Some(value) = projection.get(&key) else {
@@ -3549,10 +3588,93 @@ fn render_marker(projection: &Projection) -> String {
         rendered.push_str("- ");
         rendered.push_str(&key);
         rendered.push_str(": ");
-        rendered.push_str(&value.as_marker_value());
+        if key == FIELD_PARENT {
+            rendered.push_str(&render_marker_parent_value(value)?);
+        } else {
+            rendered.push_str(&value.as_marker_value());
+        }
         rendered.push('\n');
     }
-    rendered
+    Ok(rendered)
+}
+
+fn validate_marker_parent_value(
+    raw_value: &str,
+    line_number: usize,
+    parsed_value: &MarkerValue,
+) -> Result<()> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return Err(empty_parent_error("marker"));
+    }
+    if matches!(parsed_value, MarkerValue::Null) {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; null is not supported"
+        )));
+    }
+    if matches!(parsed_value, MarkerValue::List(_)) {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; inline lists are not supported"
+        )));
+    }
+    if trimmed.starts_with("![[") && trimmed.ends_with("]]") {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; embeds are not supported"
+        )));
+    }
+    if is_wikilink(trimmed) {
+        let detail = if trimmed[2..trimmed.len() - 2].contains('|') {
+            "aliases are not supported"
+        } else if trimmed[2..trimmed.len() - 2].contains("#^") {
+            "block links are not supported"
+        } else {
+            "wikilinks are not supported"
+        };
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; {detail}"
+        )));
+    }
+    if trimmed.contains("[[") || trimmed.contains("]]") {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; wikilinks are not supported"
+        )));
+    }
+    if trimmed.starts_with(['"', '\'']) || trimmed.ends_with(['"', '\'']) {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; quoted parent values are not supported"
+        )));
+    }
+    if trimmed.contains("#^") {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; block links are not supported"
+        )));
+    }
+    if trimmed.contains('|') {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; aliases are not supported"
+        )));
+    }
+    if trimmed.starts_with('[') || trimmed.ends_with(']') {
+        return Err(CommandError::new(format!(
+            "invalid marker parent on line {line_number}: parent must be a bare note target; structured marker syntax is not supported"
+        )));
+    }
+    Ok(())
+}
+
+fn render_marker_parent_value(value: &MarkerValue) -> Result<String> {
+    let Some(parent) = value.as_string() else {
+        return Err(CommandError::new(
+            "parent cannot be rendered as a PDF marker bare note target: expected a canonical wikilink string",
+        ));
+    };
+    let Some(target) = simple_wikilink_target(parent) else {
+        return Err(CommandError::new(format!(
+            "parent cannot be rendered as a PDF marker bare note target: expected a simple wikilink like [[memory_ref]], got {}",
+            quote_string(parent)
+        )));
+    };
+    Ok(target.to_string())
 }
 
 fn ordered_projection_keys(projection: &Projection) -> Vec<String> {
@@ -4024,8 +4146,16 @@ fn temporary_write_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(temp_name))
 }
 
-fn render_plain_or_quoted(value: &str) -> String {
-    if can_render_plain_marker_string(value) {
+fn render_marker_scalar_string(value: &str) -> String {
+    if can_render_plain_marker_scalar_string(value) {
+        value.to_string()
+    } else {
+        quote_string(value)
+    }
+}
+
+fn render_marker_list_string(value: &str) -> String {
+    if can_render_plain_marker_list_string(value) {
         value.to_string()
     } else {
         quote_string(value)
@@ -4040,25 +4170,41 @@ fn render_frontmatter_string(value: &str) -> String {
     }
 }
 
-fn can_render_plain_marker_string(value: &str) -> bool {
+fn can_render_plain_marker_scalar_string(value: &str) -> bool {
     if value.starts_with("[[") && value.ends_with("]]") {
         return true;
     }
     !value.is_empty()
-        && !value.chars().any(char::is_whitespace)
-        && !matches!(
-            value,
-            "null" | "true" | "false" | "~" | "Null" | "True" | "False"
-        )
+        && value.trim() == value
+        && !value
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+        && !is_marker_typed_literal(value)
         && !value.starts_with(['[', '{', '"', '\'', '-', '*', '#', '!', '&'])
+}
+
+fn can_render_plain_marker_list_string(value: &str) -> bool {
+    can_render_plain_marker_scalar_string(value)
         && !value.contains(',')
+        && (is_wikilink(value)
+            || !value
+                .chars()
+                .any(|character| matches!(character, '[' | ']')))
 }
 
 fn can_render_plain_frontmatter_string(value: &str) -> bool {
-    can_render_plain_marker_string(value)
+    can_render_plain_marker_scalar_string(value)
+        && !value.chars().any(char::is_whitespace)
         && !value.contains(':')
         && !value.contains('[')
         && !value.contains(']')
+}
+
+fn is_marker_typed_literal(value: &str) -> bool {
+    matches!(
+        value,
+        "null" | "true" | "false" | "~" | "Null" | "True" | "False"
+    ) || is_number_literal(value)
 }
 
 fn quote_string(value: &str) -> String {
@@ -4655,7 +4801,7 @@ Unlabeled comment
 - Status: wip
 * aliases: [\"Systems Performance\", linux]
 - source-url: https://example.com/book
-- parent: [[obsidian]]
+- parent: obsidian
 - rating: 5
 - archived: false
 ",
@@ -4704,14 +4850,41 @@ Unlabeled comment
             spaced.get("parent"),
             Some(&MarkerValue::String("[[Systems Performance]]".to_string()))
         );
+    }
 
-        let linked =
-            parse_marker("- status: wip\n- parent: [[obsidian|Obsidian]]\n")
-                .expect("parse linked parent marker");
-        assert_eq!(
-            linked.get("parent"),
-            Some(&MarkerValue::String("[[obsidian|Obsidian]]".to_string()))
-        );
+    #[test]
+    fn marker_parser_rejects_linked_parent_targets() {
+        let cases = [
+            (
+                "- status: wip\n- parent: [[obsidian]]\n",
+                "wikilinks are not supported",
+            ),
+            (
+                "- status: wip\n- parent: [[obsidian|Obsidian]]\n",
+                "aliases are not supported",
+            ),
+            (
+                "- status: wip\n- parent: ![[obsidian]]\n",
+                "embeds are not supported",
+            ),
+            (
+                "- status: wip\n- parent: [[obsidian#^block]]\n",
+                "block links are not supported",
+            ),
+            (
+                "- status: wip\n- parent: \"obsidian\"\n",
+                "quoted parent values are not supported",
+            ),
+        ];
+
+        for (marker, expected_error) in cases {
+            let error =
+                parse_marker(marker).expect_err("linked parent should fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "expected {expected_error:?} in {error}"
+            );
+        }
     }
 
     #[test]
@@ -4735,7 +4908,7 @@ Body
         );
 
         let marker_projection =
-            parse_marker("- status: wip\n- parent: [[obsidian]]\n")
+            parse_marker("- status: wip\n- parent: obsidian\n")
                 .expect("parse marker");
         let marker_hash =
             projection_hash(&marker_projection).expect("hash marker");
@@ -4752,7 +4925,7 @@ Body
         assert!(
             marker_error
                 .to_string()
-                .contains("marker parent must be a scalar note target"),
+                .contains("inline lists are not supported"),
             "{marker_error}"
         );
 
@@ -4792,28 +4965,27 @@ Body
             .contains("missing required marker key: parent"));
 
         let marker_type = parse_marker(
-            "- status: wip\n- parent: [[obsidian]]\n- type: [[book]]\n",
+            "- status: wip\n- parent: obsidian\n- type: [[book]]\n",
         )
         .expect_err("marker type should fail");
         assert!(marker_type.to_string().contains("command-managed"));
 
         let marker_ref_type = parse_marker(
-            "- status: wip\n- parent: [[obsidian]]\n- ref_type: books\n",
+            "- status: wip\n- parent: obsidian\n- ref_type: books\n",
         )
         .expect_err("marker ref_type should fail");
         assert!(marker_ref_type.to_string().contains("command-managed"));
 
-        let duplicate = parse_marker(
-            "- status: wip\n- parent: [[obsidian]]\n- Status: done\n",
-        )
-        .expect_err("duplicate status should fail");
+        let duplicate =
+            parse_marker("- status: wip\n- parent: obsidian\n- Status: done\n")
+                .expect_err("duplicate status should fail");
         assert!(duplicate.to_string().contains("duplicate marker key"));
     }
 
     #[test]
     fn status_validation_rejects_unsupported_and_non_scalar_values() {
         let unsupported =
-            parse_marker("- status: queued\n- parent: [[obsidian]]\n")
+            parse_marker("- status: queued\n- parent: obsidian\n")
                 .expect_err("unsupported status should fail");
         assert!(
             unsupported
@@ -4822,9 +4994,8 @@ Body
             "{unsupported}"
         );
 
-        let non_scalar =
-            parse_marker("- status: [wip]\n- parent: [[obsidian]]\n")
-                .expect_err("list status should fail");
+        let non_scalar = parse_marker("- status: [wip]\n- parent: obsidian\n")
+            .expect_err("list status should fail");
         assert!(
             non_scalar
                 .to_string()
@@ -4854,13 +5025,35 @@ Body
         );
 
         assert_eq!(
-            render_marker(&projection),
+            render_marker(&projection).expect("render marker"),
             "\
 - status: wip
-- parent: [[obsidian]]
-- title: \"Systems Performance\"
+- parent: obsidian
+- title: Systems Performance
 - z_custom: last
 "
+        );
+    }
+
+    #[test]
+    fn marker_renderer_rejects_unrepresentable_parent_links() {
+        let mut projection = Projection::new();
+        projection.insert(
+            "status".to_string(),
+            MarkerValue::String("wip".to_string()),
+        );
+        projection.insert(
+            "parent".to_string(),
+            MarkerValue::String("[[obsidian|Obsidian]]".to_string()),
+        );
+
+        let error =
+            render_marker(&projection).expect_err("alias parent should fail");
+        assert!(
+            error.to_string().contains(
+                "parent cannot be rendered as a PDF marker bare note target"
+            ),
+            "{error}"
         );
     }
 

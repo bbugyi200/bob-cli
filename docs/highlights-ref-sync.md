@@ -137,10 +137,11 @@ Allowed list markers:
 * key: value
 ```
 
-`status` and `parent` are required marker keys. `parent` may be a bare note
-target such as `obsidian` or `Systems Performance`; existing wikilinks such as
-`[[obsidian]]` are also accepted. Generated reference notes render `parent` as
-an Obsidian wikilink.
+`status` and `parent` are required marker keys. Marker `parent` must be a bare
+note target such as `obsidian` or `Systems Performance`; Obsidian wikilinks such
+as `[[obsidian]]`, aliases, embeds, and block links are rejected in the PDF
+marker. Generated reference notes still render `parent` frontmatter as an
+Obsidian wikilink, for example `parent: "[[obsidian]]"`.
 
 `status` must be a scalar string and must exactly match one of:
 
@@ -714,7 +715,8 @@ Common failure snippets and fixes:
 | `no standalone /Text note annotations found on page 1` | The PDF has no page-1 standalone marker note. | Add the first standalone PDF note on page 1 in Highlights. |
 | `missing required marker key: status` | The marker list lacks `status`. | Add `- status: wip` to the marker. |
 | `unsupported status` | `status` is not one of `unread`, `wip`, `done`, `abandoned`, or `legacy`. | Change the marker or frontmatter status to a supported value. |
-| `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add `- parent: obsidian` to the marker or frontmatter source; `[[obsidian]]` is also accepted. |
+| `missing required marker key: parent` | The marker/frontmatter projection lacks `parent`. | Add a bare marker parent such as `- parent: obsidian`, or add frontmatter parent such as `parent: "[[obsidian]]"`. |
+| `wikilinks are not supported` | The PDF marker `parent` uses Obsidian link syntax. | Remove the brackets in the PDF marker, e.g. use `- parent: obsidian`. |
 | `'type' is command-managed` | The marker tries to set the generated note `type`. | Remove `type` from the marker; generated notes get `type: "[[ref]]"` automatically. |
 | `'ref_type' is command-managed` | The marker tries to set the path-derived reference type. | Remove `ref_type` from the marker; nested library paths derive it automatically. |
 | `invalid marker item on line` | A marker line is not `- key: value` or `* key: value`. | Rewrite the marker as a flat list. |

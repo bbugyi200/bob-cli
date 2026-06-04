@@ -1481,8 +1481,8 @@ fn highlights_ref_marker_uses_first_page_text_annotation() {
     write_highlights_pdf_pages(
         &pdf,
         &[
-            &["- status: wip\n- parent: [[obsidian]]\n- title: Page One\n"],
-            &["- status: done\n- parent: [[ignored]]\n- title: Page Two\n"],
+            &["- status: wip\n- parent: obsidian\n- title: Page One\n"],
+            &["- status: done\n- parent: ignored\n- title: Page Two\n"],
         ],
     );
 
@@ -1515,7 +1515,7 @@ fn highlights_ref_scan_treats_later_page_note_as_missing_marker() {
         &pdf,
         &[
             &[],
-            &["- status: wip\n- parent: [[obsidian]]\n- title: Page Two\n"],
+            &["- status: wip\n- parent: obsidian\n- title: Page Two\n"],
         ],
     );
 
@@ -1551,10 +1551,7 @@ fn highlights_ref_sync_rejects_missing_marker_status_without_note_write() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/missing-status.pdf");
     let note = vault.join("ref/missing-status.md");
-    write_highlights_pdf(
-        &pdf,
-        "- parent: [[obsidian]]\n- title: Missing Status\n",
-    );
+    write_highlights_pdf(&pdf, "- parent: obsidian\n- title: Missing Status\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -1587,7 +1584,7 @@ fn highlights_ref_sync_rejects_unsupported_marker_status_without_note_write() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/unsupported-status.pdf");
     let note = vault.join("ref/unsupported-status.md");
-    write_highlights_pdf(&pdf, "- status: queued\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: queued\n- parent: obsidian\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -1648,26 +1645,98 @@ fn highlights_ref_sync_rejects_missing_marker_parent_without_note_write() {
 }
 
 #[test]
+fn highlights_ref_rejects_wikilink_marker_parent_before_writes() {
+    let temp = TempDir::new("bob-cli-highlights-ref-linked-parent");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/linked-parent.pdf");
+    let note = vault.join("ref/linked-parent.md");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: [[obsidian]]\n- title: Linked Parent\n",
+    );
+
+    let sync = bob_command()
+        .arg("highlights-ref")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("run bob highlights-ref sync");
+    assert_eq!(
+        sync.status.code(),
+        Some(1),
+        "linked marker parent should fail sync:\n{}",
+        format_output(&sync)
+    );
+    assert!(
+        stderr(&sync).contains("wikilinks are not supported"),
+        "expected linked parent error:\n{}",
+        format_output(&sync)
+    );
+    assert!(!note.exists(), "sync must not write a note on marker error");
+
+    let marker = bob_command()
+        .arg("highlights-ref")
+        .arg("marker")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("run bob highlights-ref marker");
+    assert_eq!(
+        marker.status.code(),
+        Some(1),
+        "linked marker parent should fail marker inspection:\n{}",
+        format_output(&marker)
+    );
+    assert!(
+        stderr(&marker).contains("wikilinks are not supported"),
+        "expected linked parent error:\n{}",
+        format_output(&marker)
+    );
+
+    let scan = bob_command()
+        .arg("highlights-ref")
+        .arg("scan")
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("run bob highlights-ref scan");
+    assert_eq!(
+        scan.status.code(),
+        Some(1),
+        "linked marker parent should fail scan planning:\n{}",
+        format_output(&scan)
+    );
+    assert!(
+        stderr(&scan).contains("scan failed before writes")
+            && stderr(&scan).contains("wikilinks are not supported"),
+        "expected scan linked parent error:\n{}",
+        format_output(&scan)
+    );
+    assert!(!note.exists(), "scan must not write a note on marker error");
+}
+
+#[test]
 fn highlights_ref_sync_rejects_malformed_and_duplicate_marker_lists() {
     let cases = [
         (
             "malformed-marker",
-            "status: wip\n- parent: [[obsidian]]\n",
+            "status: wip\n- parent: obsidian\n",
             "invalid marker item on line 1",
         ),
         (
             "duplicate-marker-key",
-            "- status: wip\n- parent: [[obsidian]]\n- Status: done\n",
+            "- status: wip\n- parent: obsidian\n- Status: done\n",
             "duplicate marker key on line 3",
         ),
         (
             "managed-type-marker-key",
-            "- status: wip\n- parent: [[obsidian]]\n- type: [[book]]\n",
+            "- status: wip\n- parent: obsidian\n- type: [[book]]\n",
             "'type' is command-managed",
         ),
         (
             "managed-ref-type-marker-key",
-            "- status: wip\n- parent: [[obsidian]]\n- ref_type: books\n",
+            "- status: wip\n- parent: obsidian\n- ref_type: books\n",
             "'ref_type' is command-managed",
         ),
     ];
@@ -1713,7 +1782,7 @@ fn highlights_ref_dry_run_and_inspection_do_not_modify_vault_files() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     fs::create_dir_all(vault.join("ref")).expect("create ref dir");
     git_in(&vault, ["init", "-q"]);
     git_in(&vault, ["config", "user.name", "Test User"]);
@@ -1778,11 +1847,11 @@ fn highlights_ref_scan_recurses_dry_runs_and_writes_multiple_pdfs() {
     let second_note = vault.join("ref/papers/rust-book.md");
     write_highlights_pdf(
         &first_pdf,
-        "- status: wip\n- parent: [[obsidian]]\n- title: Systems Performance\n",
+        "- status: wip\n- parent: obsidian\n- title: Systems Performance\n",
     );
     write_highlights_pdf(
         &second_pdf,
-        "- status: unread\n- parent: [[obsidian]]\n- title: Rust Book\n",
+        "- status: unread\n- parent: obsidian\n- title: Rust Book\n",
     );
     write_file(
         &first_pdf.with_extension("md"),
@@ -1909,7 +1978,7 @@ fn highlights_ref_scan_jobs_flag_matches_sequential_output() {
         write_highlights_pdf(
             &pdf,
             &format!(
-                "- status: {status}\n- parent: [[obsidian]]\n- title: {title}\n"
+                "- status: {status}\n- parent: obsidian\n- title: {title}\n"
             ),
         );
         write_file(
@@ -1961,11 +2030,8 @@ fn highlights_ref_scan_allows_duplicate_basenames_in_different_ref_types() {
     let first_note = vault.join("ref/books/example.md");
     let second_note = vault.join("ref/papers/example.md");
     let old_flat_note = vault.join("ref/example.md");
-    write_highlights_pdf(&first_pdf, "- status: wip\n- parent: [[obsidian]]\n");
-    write_highlights_pdf(
-        &second_pdf,
-        "- status: unread\n- parent: [[obsidian]]\n",
-    );
+    write_highlights_pdf(&first_pdf, "- status: wip\n- parent: obsidian\n");
+    write_highlights_pdf(&second_pdf, "- status: unread\n- parent: obsidian\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -2000,11 +2066,8 @@ fn highlights_ref_scan_detects_same_target_collision_before_writing() {
     let first_pdf = vault.join("lib/books/example.pdf");
     let second_pdf = vault.join("lib/books/example.PDF");
     let note = vault.join("ref/books/example.md");
-    write_highlights_pdf(&first_pdf, "- status: wip\n- parent: [[obsidian]]\n");
-    write_highlights_pdf(
-        &second_pdf,
-        "- status: unread\n- parent: [[obsidian]]\n",
-    );
+    write_highlights_pdf(&first_pdf, "- status: wip\n- parent: obsidian\n");
+    write_highlights_pdf(&second_pdf, "- status: unread\n- parent: obsidian\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -2036,7 +2099,7 @@ fn highlights_ref_sync_refuses_dirty_target_note_before_writing() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2055,7 +2118,7 @@ fn highlights_ref_sync_refuses_dirty_target_note_before_writing() {
         .expect("read note")
         .replace("## Highlights\n\n", "Local edit.\n\n## Highlights\n\n");
     write_file(&note, &dirty_note);
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
 
     let output = bob_command()
         .arg("highlights-ref")
@@ -2089,7 +2152,7 @@ fn highlights_ref_sync_allows_dirty_tracked_frontmatter_writeback() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2136,7 +2199,7 @@ fn highlights_ref_doctor_checks_vault_git_and_ob_without_writes() {
     fs::create_dir_all(&stub_bin).expect("create stub bin");
     let ob_stub = stub_bin.join("ob");
     write_executable(&ob_stub, "#!/bin/sh\nexit 0\n");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     write_file(
         &sidecar,
         "\
@@ -2178,7 +2241,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2189,7 +2252,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
     let output = bob_command()
         .arg("highlights-ref")
         .arg("sync")
@@ -2213,7 +2276,10 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: The Log is the Agent\n",
+    );
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2275,6 +2341,11 @@ fn highlights_ref_frontmatter_edit_updates_marker_when_pdf_writes_enabled() {
     assert_success(&output);
     let marker = pdf_marker_contents(&pdf);
     assert!(marker.contains("- status: done\n"), "{marker}");
+    assert!(marker.contains("- parent: obsidian\n"), "{marker}");
+    assert!(
+        marker.contains("- title: The Log is the Agent\n"),
+        "{marker}"
+    );
     assert!(!marker.contains("- type:"), "{marker}");
     let pdf_hash_after_write = sha256_file(&pdf);
     assert_ne!(
@@ -2322,7 +2393,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2485,7 +2556,7 @@ fn highlights_ref_task_checked_dirty_tracked_note_is_allowed() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2534,7 +2605,7 @@ fn highlights_ref_task_checked_competing_status_edits_fail() {
         let vault = temp.path().join("vault");
         let pdf = vault.join("lib/example.pdf");
         let note = vault.join("ref/example.md");
-        write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+        write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
         assert_success(
             &bob_command()
                 .arg("highlights-ref")
@@ -2553,7 +2624,7 @@ fn highlights_ref_task_checked_competing_status_edits_fail() {
         } else {
             set_pdf_marker_contents(
                 &pdf,
-                "- status: abandoned\n- parent: [[obsidian]]\n",
+                "- status: abandoned\n- parent: obsidian\n",
             );
         }
         write_file(&note, &edited);
@@ -2598,7 +2669,7 @@ fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2609,7 +2680,7 @@ fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
     let edited = fs::read_to_string(&note).expect("read ref note").replace(
         "parent: \"[[obsidian]]\"\n",
         "parent: \"[[obsidian]]\"\ntitle: \"Frontmatter Title\"\n",
@@ -2655,10 +2726,8 @@ fn highlights_ref_non_overlapping_edits_auto_merge_and_settle() {
     );
     let marker = pdf_marker_contents(&pdf);
     assert!(marker.contains("- status: done\n"), "{marker}");
-    assert!(
-        marker.contains("- title: \"Frontmatter Title\"\n"),
-        "{marker}"
-    );
+    assert!(marker.contains("- parent: obsidian\n"), "{marker}");
+    assert!(marker.contains("- title: Frontmatter Title\n"), "{marker}");
     let note_after = fs::read_to_string(&note).expect("read merged note");
     assert!(note_after.contains("status: done\n"), "{note_after}");
     assert!(
@@ -2690,7 +2759,7 @@ fn highlights_ref_frontmatter_missing_parent_fails_before_pdf_writeback() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2735,7 +2804,7 @@ fn highlights_ref_frontmatter_unsupported_status_fails_before_pdf_writeback() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2781,7 +2850,7 @@ fn highlights_ref_conflicting_edits_fail_and_prefer_frontmatter_resolves() {
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     assert_success(
         &bob_command()
             .arg("highlights-ref")
@@ -2792,7 +2861,7 @@ fn highlights_ref_conflicting_edits_fail_and_prefer_frontmatter_resolves() {
             .expect("initial highlights-ref sync"),
     );
 
-    set_pdf_marker_contents(&pdf, "- status: done\n- parent: [[obsidian]]\n");
+    set_pdf_marker_contents(&pdf, "- status: done\n- parent: obsidian\n");
     let frontmatter_side = fs::read_to_string(&note)
         .expect("read ref note")
         .replace("status: wip", "status: abandoned");
@@ -2859,7 +2928,7 @@ fn highlights_ref_sync_renders_sidecar_highlights_and_notes() {
     let old_flat_note = vault.join("ref/systems-performance.md");
     write_highlights_pdf(
         &pdf,
-        "- status: wip\n- parent: [[obsidian]]\n- title: Systems Performance\n",
+        "- status: wip\n- parent: obsidian\n- title: Systems Performance\n",
     );
     write_file(
         &sidecar,
@@ -3067,7 +3136,7 @@ fn highlights_ref_comment_edit_keeps_stable_block_id() {
     let pdf = vault.join("lib/example.pdf");
     let sidecar = pdf.with_extension("md");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     write_file(
         &sidecar,
         "\
@@ -3131,7 +3200,7 @@ fn highlights_ref_deleted_highlight_is_tombstoned() {
     let pdf = vault.join("lib/example.pdf");
     let sidecar = pdf.with_extension("md");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     write_file(
         &sidecar,
         "\
@@ -3200,7 +3269,7 @@ fn highlights_ref_sync_preserves_manual_sections_and_rejects_missing_markers() {
     let pdf = vault.join("lib/example.pdf");
     let sidecar = pdf.with_extension("md");
     let note = vault.join("ref/example.md");
-    write_highlights_pdf(&pdf, "- status: wip\n- parent: [[obsidian]]\n");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
     write_file(
         &sidecar,
         "\
@@ -3260,10 +3329,7 @@ Comment: added later
 
     let unsafe_pdf = vault.join("lib/unsafe.pdf");
     let unsafe_note = vault.join("ref/unsafe.md");
-    write_highlights_pdf(
-        &unsafe_pdf,
-        "- status: wip\n- parent: [[obsidian]]\n",
-    );
+    write_highlights_pdf(&unsafe_pdf, "- status: wip\n- parent: obsidian\n");
     write_file(
         &unsafe_note,
         "\
