@@ -207,7 +207,6 @@ enum GitState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GitPrepareError {
-    DirtyCandidateFiles(Vec<String>),
     Command(i32),
 }
 
@@ -324,18 +323,6 @@ pub(crate) fn run_collection(threshold: usize, child_env: &ChildEnv) -> i32 {
 
     let git_state = match prepare_git(&vault, child_env, &plan) {
         Ok(git_state) => git_state,
-        Err(GitPrepareError::DirtyCandidateFiles(paths)) => {
-            println!("git:");
-            println!("  detected: git worktree");
-            println!("  refusing: pre-existing changes in candidate files");
-            eprintln!(
-                "{COMMAND_NAME}: refusing to modify candidate files with pre-existing git changes:"
-            );
-            for path in paths {
-                eprintln!("  {path}");
-            }
-            return 1;
-        }
         Err(GitPrepareError::Command(exit_code)) => return exit_code,
     };
 
@@ -513,11 +500,6 @@ fn prepare_git(
     }
 
     let touched_paths = touched_git_paths(plan);
-    let dirty_paths = dirty_candidate_paths(vault, child_env, &touched_paths)?;
-    if !dirty_paths.is_empty() {
-        return Err(GitPrepareError::DirtyCandidateFiles(dirty_paths));
-    }
-
     Ok(GitState::Worktree {
         touched_paths,
         commit_message: collect_done_commit_message(),
@@ -562,37 +544,6 @@ fn touched_git_paths(plan: &CollectionPlan) -> Vec<PathBuf> {
         paths.insert(repair.relative_path.clone());
     }
     paths.into_iter().collect()
-}
-
-fn dirty_candidate_paths(
-    vault: &Path,
-    child_env: &ChildEnv,
-    touched_paths: &[PathBuf],
-) -> Result<Vec<String>, GitPrepareError> {
-    let mut command = ob::git_command(vault, child_env);
-    command
-        .arg("status")
-        .arg("--porcelain=v1")
-        .arg("--untracked-files=all")
-        .arg("--")
-        .args(touched_paths);
-    let output = command.output().map_err(|error| {
-        eprintln!("{COMMAND_NAME}: failed to run git status: {error}");
-        GitPrepareError::Command(1)
-    })?;
-
-    if !output.status.success() {
-        report_git_failure("git status", &output);
-        return Err(GitPrepareError::Command(bob_env::exit_code(
-            output.status,
-        )));
-    }
-
-    let status = String::from_utf8_lossy(&output.stdout);
-    Ok(status
-        .lines()
-        .map(|line| line.get(3..).unwrap_or(line).to_string())
-        .collect())
 }
 
 fn finish_git(

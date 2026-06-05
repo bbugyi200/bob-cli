@@ -120,11 +120,11 @@ be rewritten; heading links and tasks without block ids do not have a stable
 target to repair.
 
 The command itself does not run `ob sync`; `bob nightly` runs the shared
-Obsidian sync gate before invoking it. In a Git worktree, the command refuses to
-modify source, archive, or link-repair candidates that already have uncommitted
-changes, stages only the files it touches, commits with a
-`bob move-done-tasks YYYY-MM-DD` message, and pushes. Non-Git vaults are left
-uncommitted.
+Obsidian sync gate before invoking it. In a Git worktree, the command stages
+only the files it touches, commits with a `bob move-done-tasks YYYY-MM-DD`
+message, and pushes. Existing uncommitted changes in touched source, archive,
+or link-repair files are included in that scoped commit after the command
+rewrites those files. Non-Git vaults are left uncommitted.
 
 ```bash
 bob highlights doctor
@@ -330,7 +330,8 @@ Before running `bob bulk-git-commit` in a release smoke test, verify that
 `BOB_DIR` points at the intended vault and that its Git remote can be pushed
 without prompts. Before running `bob move-done-tasks` against the real vault,
 verify that `~/bob` is the intended vault, inspect `git -C ~/bob status --short`,
-and expect the command to skip candidate files that are already dirty.
+and review any local edits that may be included when touched candidate files are
+rewritten.
 
 The default `bob dataview` smoke tests are local and headless. Before running
 live Obsidian smoke tests, start desktop Obsidian, open the target vault, enable

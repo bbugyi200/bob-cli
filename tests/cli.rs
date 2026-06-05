@@ -4548,19 +4548,15 @@ done_tasks: \"[[done/obsidian_done]]\"
 }
 
 #[test]
-fn move_done_tasks_refuses_dirty_link_repair_files_before_mutation() {
+fn move_done_tasks_rewrites_dirty_link_repair_files() {
     let temp = TempDir::new("bob-cli-move-done-tasks-dirty-link-repair");
     let stub_bin = temp.path().join("bin");
-    let vault = temp.path().join("vault");
+    let (vault, _remote) = init_git_vault_with_remote(&temp);
     let source = vault.join("obsidian.md");
     let daily = vault.join("daily.md");
     let archive = vault.join("done/obsidian_done.md");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
-    fs::create_dir_all(&vault).expect("create vault");
     write_successful_ob_stub(&stub_bin);
-    git_in(&vault, ["init", "-q"]);
-    git_in(&vault, ["config", "user.name", "Test User"]);
-    git_in(&vault, ["config", "user.email", "test@example.com"]);
     let source_contents = "\
 - [x] done #task ^abc123
 - [ ] active #task
@@ -4569,6 +4565,7 @@ fn move_done_tasks_refuses_dirty_link_repair_files_before_mutation() {
     write_file(&daily, "Reference [[obsidian#^abc123]].\n");
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
     let dirty_daily = "Reference [[obsidian#^abc123]].\nlocal edit\n";
     write_file(&daily, dirty_daily);
 
@@ -4576,52 +4573,67 @@ fn move_done_tasks_refuses_dirty_link_repair_files_before_mutation() {
         .arg("move-done-tasks")
         .arg("--threshold=1")
         .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
         .env("PATH", path_with_prefix(&stub_bin))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
         .expect("run bob move-done-tasks with dirty link repair candidate");
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "expected dirty link repair candidate failure:\n{}",
-        format_output(&output)
-    );
+    assert_success(&output);
     assert!(
-        stdout(&output)
-            .contains("refusing: pre-existing changes in candidate files"),
-        "expected dirty candidate stdout:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        stderr(&output).contains("daily.md"),
-        "expected dirty link repair path in stderr:\n{}",
+        stdout(&output).contains("Obsidian links repaired: 1")
+            && stdout(&output)
+                .contains("committed: bob move-done-tasks 2026-06-02")
+            && stdout(&output).contains("pushed"),
+        "expected dirty link repair candidate success:\n{}",
         format_output(&output)
     );
     assert_eq!(
         fs::read_to_string(&source).expect("read source"),
-        source_contents
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+"
     );
-    assert_eq!(fs::read_to_string(&daily).expect("read daily"), dirty_daily);
+    assert_eq!(
+        fs::read_to_string(&daily).expect("read daily"),
+        "Reference [[done/obsidian_done#^abc123]].\nlocal edit\n"
+    );
     assert!(
-        !archive.exists(),
-        "archive should not be created when link repair candidate is dirty"
+        fs::read_to_string(&archive)
+            .expect("read archive")
+            .contains("- [x] done #task ^abc123"),
+        "expected archived task"
+    );
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        show.contains("\nobsidian.md\n")
+            && show.contains("\ndone/obsidian_done.md\n")
+            && show.contains("\ndaily.md\n"),
+        "expected dirty link repair paths in commit:\n{show}"
+    );
+    let status = stdout(&git_in(&vault, ["status", "--short"]));
+    assert!(
+        status.trim().is_empty(),
+        "dirty link repair paths should be clean after commit:\n{status}"
     );
 }
 
 #[test]
-fn move_done_tasks_refuses_dirty_candidate_files_before_mutation() {
+fn move_done_tasks_rewrites_dirty_candidate_files() {
     let temp = TempDir::new("bob-cli-move-done-tasks-dirty-candidate");
     let stub_bin = temp.path().join("bin");
-    let vault = temp.path().join("vault");
+    let (vault, _remote) = init_git_vault_with_remote(&temp);
     let source = vault.join("obsidian.md");
     let archive = vault.join("done/obsidian_done.md");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
-    fs::create_dir_all(&vault).expect("create vault");
     write_successful_ob_stub(&stub_bin);
-    git_in(&vault, ["init", "-q"]);
-    git_in(&vault, ["config", "user.name", "Test User"]);
-    git_in(&vault, ["config", "user.email", "test@example.com"]);
     write_file(
         &source,
         "\
@@ -4631,6 +4643,7 @@ fn move_done_tasks_refuses_dirty_candidate_files_before_mutation() {
     );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
     let dirty_source = "\
 - [x] done #task
 - [ ] active #task
@@ -4642,51 +4655,63 @@ local edit
         .arg("move-done-tasks")
         .arg("--threshold=1")
         .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
         .env("PATH", path_with_prefix(&stub_bin))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
         .expect("run bob move-done-tasks with dirty candidate");
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "expected dirty candidate failure:\n{}",
-        format_output(&output)
-    );
+    assert_success(&output);
     assert!(
-        stdout(&output)
-            .contains("refusing: pre-existing changes in candidate files"),
-        "expected dirty candidate stdout:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        stderr(&output).contains("obsidian.md"),
-        "expected dirty candidate path in stderr:\n{}",
+        stdout(&output).contains("task blocks: 1")
+            && stdout(&output)
+                .contains("committed: bob move-done-tasks 2026-06-02")
+            && stdout(&output).contains("pushed"),
+        "expected dirty candidate success:\n{}",
         format_output(&output)
     );
     assert_eq!(
         fs::read_to_string(&source).expect("read source"),
-        dirty_source
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+local edit
+"
     );
     assert!(
-        !archive.exists(),
-        "archive should not be created when candidate is dirty"
+        fs::read_to_string(&archive)
+            .expect("read archive")
+            .contains("- [x] done #task"),
+        "expected archived task"
+    );
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        show.contains("\nobsidian.md\n")
+            && show.contains("\ndone/obsidian_done.md\n"),
+        "expected dirty source and archive in commit:\n{show}"
+    );
+    let status = stdout(&git_in(&vault, ["status", "--short"]));
+    assert!(
+        status.trim().is_empty(),
+        "dirty candidate paths should be clean after commit:\n{status}"
     );
 }
 
 #[test]
-fn move_done_tasks_refuses_dirty_metadata_only_source_before_mutation() {
+fn move_done_tasks_rewrites_dirty_metadata_only_source() {
     let temp = TempDir::new("bob-cli-move-done-tasks-dirty-metadata");
     let stub_bin = temp.path().join("bin");
-    let vault = temp.path().join("vault");
+    let (vault, _remote) = init_git_vault_with_remote(&temp);
     let source = vault.join("obsidian.md");
     let archive = vault.join("done/obsidian_done.md");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
-    fs::create_dir_all(&vault).expect("create vault");
     write_successful_ob_stub(&stub_bin);
-    git_in(&vault, ["init", "-q"]);
-    git_in(&vault, ["config", "user.name", "Test User"]);
-    git_in(&vault, ["config", "user.email", "test@example.com"]);
     write_file(&source, "- [ ] active #task\n");
     write_file(
         &archive,
@@ -4701,6 +4726,7 @@ type: \"[[done]]\"
     );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
     let dirty_source = "- [ ] active #task\nlocal edit\n";
     write_file(&source, dirty_source);
 
@@ -4708,31 +4734,31 @@ type: \"[[done]]\"
         .arg("move-done-tasks")
         .arg("--threshold=10")
         .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
         .env("PATH", path_with_prefix(&stub_bin))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
         .expect("run bob move-done-tasks with dirty metadata candidate");
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "expected dirty candidate failure:\n{}",
-        format_output(&output)
-    );
+    assert_success(&output);
     assert!(
-        stdout(&output)
-            .contains("refusing: pre-existing changes in candidate files"),
-        "expected dirty candidate stdout:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        stderr(&output).contains("obsidian.md"),
-        "expected dirty candidate path in stderr:\n{}",
+        stdout(&output).contains("source done_tasks updates: 1")
+            && stdout(&output)
+                .contains("committed: bob move-done-tasks 2026-06-02")
+            && stdout(&output).contains("pushed"),
+        "expected dirty metadata source success:\n{}",
         format_output(&output)
     );
     assert_eq!(
         fs::read_to_string(&source).expect("read source"),
-        dirty_source
+        "\
+---
+done_tasks: \"[[done/obsidian_done]]\"
+---
+
+- [ ] active #task
+local edit
+"
     );
     assert_eq!(
         fs::read_to_string(&archive).expect("read archive"),
@@ -4745,21 +4771,31 @@ type: \"[[done]]\"
 - [x] archived #task
 "
     );
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        show.contains("\nobsidian.md\n")
+            && !show.contains("\ndone/obsidian_done.md\n"),
+        "expected only dirty metadata source in commit:\n{show}"
+    );
+    let status = stdout(&git_in(&vault, ["status", "--short"]));
+    assert!(
+        status.trim().is_empty(),
+        "dirty metadata source should be clean after commit:\n{status}"
+    );
 }
 
 #[test]
-fn move_done_tasks_refuses_dirty_metadata_only_archive_before_mutation() {
+fn move_done_tasks_rewrites_dirty_metadata_only_archive() {
     let temp = TempDir::new("bob-cli-move-done-tasks-dirty-archive");
     let stub_bin = temp.path().join("bin");
-    let vault = temp.path().join("vault");
+    let (vault, _remote) = init_git_vault_with_remote(&temp);
     let source = vault.join("obsidian.md");
     let archive = vault.join("done/obsidian_done.md");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
-    fs::create_dir_all(&vault).expect("create vault");
     write_successful_ob_stub(&stub_bin);
-    git_in(&vault, ["init", "-q"]);
-    git_in(&vault, ["config", "user.name", "Test User"]);
-    git_in(&vault, ["config", "user.email", "test@example.com"]);
     write_file(
         &source,
         "\
@@ -4782,6 +4818,7 @@ parent: \"[[done]]\"
     );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
+    git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
     let dirty_archive = "\
 ---
 parent: \"[[done]]\"
@@ -4796,6 +4833,7 @@ local edit
         .arg("move-done-tasks")
         .arg("--threshold=10")
         .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-02")
         .env("PATH", path_with_prefix(&stub_bin))
         .env("XDG_CACHE_HOME", temp.path().join("cache"))
         .output()
@@ -4803,21 +4841,13 @@ local edit
             "run bob move-done-tasks with dirty archive metadata candidate",
         );
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "expected dirty candidate failure:\n{}",
-        format_output(&output)
-    );
+    assert_success(&output);
     assert!(
-        stdout(&output)
-            .contains("refusing: pre-existing changes in candidate files"),
-        "expected dirty candidate stdout:\n{}",
-        format_output(&output)
-    );
-    assert!(
-        stderr(&output).contains("done/obsidian_done.md"),
-        "expected dirty archive candidate path in stderr:\n{}",
+        stdout(&output).contains("archive metadata repairs: 1")
+            && stdout(&output)
+                .contains("committed: bob move-done-tasks 2026-06-02")
+            && stdout(&output).contains("pushed"),
+        "expected dirty archive metadata success:\n{}",
         format_output(&output)
     );
     assert_eq!(
@@ -4832,7 +4862,29 @@ done_tasks: \"[[done/obsidian_done]]\"
     );
     assert_eq!(
         fs::read_to_string(&archive).expect("read archive"),
-        dirty_archive
+        "\
+---
+parent: \"[[obsidian]]\"
+type: \"[[done]]\"
+---
+
+- [x] archived #task
+local edit
+"
+    );
+    let show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=%s", "HEAD"],
+    ));
+    assert!(
+        !show.contains("\nobsidian.md\n")
+            && show.contains("\ndone/obsidian_done.md\n"),
+        "expected only dirty archive metadata file in commit:\n{show}"
+    );
+    let status = stdout(&git_in(&vault, ["status", "--short"]));
+    assert!(
+        status.trim().is_empty(),
+        "dirty metadata archive should be clean after commit:\n{status}"
     );
 }
 
@@ -5372,17 +5424,23 @@ fn nightly_failed_step_still_runs_later_steps_and_exits_nonzero() {
     let (vault, remote) = init_git_vault_with_remote(&temp);
     let home = temp.path().join("home");
     let source = vault.join("obsidian.md");
+    let blocking_done_path = vault.join("done");
+    let extra = vault.join("extra.md");
     fs::create_dir_all(&stub_bin).expect("create stub bin");
     fs::create_dir_all(&home).expect("create home");
     write_file(&source, &done_tasks_source(12));
+    write_file(
+        &blocking_done_path,
+        "regular file blocking done/ archive directory\n",
+    );
     git_in(&vault, ["add", "."]);
     git_in(&vault, ["commit", "-q", "-m", "initial vault"]);
     git_in(&vault, ["push", "-q", "-u", "origin", "HEAD"]);
-    // A pre-existing edit to a move-done-tasks candidate makes
-    // move-done-tasks refuse (exit 1); the later bulk-git-commit step must
-    // still run and commit it.
-    let dirty_source = format!("{}local edit\n", done_tasks_source(12));
-    write_file(&source, &dirty_source);
+    // The regular file at `done` makes the archive target
+    // `done/obsidian_done.md` impossible to read or write, so
+    // move-done-tasks fails while the later bulk-git-commit step can still
+    // commit unrelated vault changes.
+    write_file(&extra, "- [ ] later step still runs #task\n");
     write_successful_ob_stub(&stub_bin);
 
     let output = bob_command()
@@ -5414,12 +5472,20 @@ fn nightly_failed_step_still_runs_later_steps_and_exits_nonzero() {
         format_output(&output)
     );
 
-    // The bulk-git-commit step still ran: the dirty edit was committed and
-    // pushed.
+    // The bulk-git-commit step still ran: the unrelated vault change was
+    // committed and pushed.
     assert_eq!(
         stdout(&git_in(&vault, ["log", "-1", "--format=%s"])).trim(),
         "legacy fallback commit",
         "the later bulk-git-commit step should commit despite the earlier failure"
+    );
+    let bulk_show = stdout(&git_in(
+        &vault,
+        ["show", "--name-only", "--format=", "HEAD"],
+    ));
+    assert!(
+        bulk_show.contains("extra.md"),
+        "bulk-git-commit step should commit the unrelated file:\n{bulk_show}"
     );
     let remote_head =
         stdout(&git(["--git-dir", path_str(&remote), "rev-parse", "HEAD"]));
