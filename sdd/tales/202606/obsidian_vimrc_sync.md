@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-05 16:12:32
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_vimrc_sync.md
 ---
 # Fix Obsidian VimRC Sync
