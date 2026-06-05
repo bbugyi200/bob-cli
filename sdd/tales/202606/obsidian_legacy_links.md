@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-05 13:50:39
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_legacy_links.md
 ---
 # Obsidian Legacy Link Migration Plan
