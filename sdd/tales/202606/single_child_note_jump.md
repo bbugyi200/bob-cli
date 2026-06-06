@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-06 13:19:03
-status: wip
+status: done
 prompt: sdd/prompts/202606/single_child_note_jump.md
 ---
 # Plan: Single Child Note Direct Jump
