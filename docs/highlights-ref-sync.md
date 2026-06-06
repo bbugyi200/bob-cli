@@ -392,17 +392,17 @@ The generated task line is a completion affordance:
 - [ ] #task [[lib/books/example.pdf]] [p::2] ^task
 ```
 
-Checking it with `[x]` or `[X]` means `status: read`. Unchecking it does not
-infer a replacement status. Existing Obsidian Tasks cancelled lines using
-`[-]` are tolerated and may keep metadata such as `[cancelled:: 2026-06-04]`,
-but they behave like unchecked lines and do not infer a replacement status.
-When the final synced status is `read`, `sync` checks the generated task line
-if it is present; existing notes without that exact generated line are not
-bulk-migrated. If the checked task would update the PDF marker,
-`sync --dry-run` previews `pdf_marker_action: would-update`, plain `sync`
-refuses before writes, and targeted `sync --write-pdf` writes the marker.
-`scan --dry-run` previews this work. A writing scan keeps the default note-only
-refusal unless `--write-pdfs` is supplied.
+Checking it with `[x]` or `[X]` means `status: read`. Cancelling it with `[-]`
+means `status: abandoned` and may keep metadata such as
+`[cancelled:: 2026-06-04]`. Unchecking it does not infer a replacement status.
+When the final synced status is `read`, `sync` checks the generated task line;
+when it is `abandoned`, `sync` cancels the generated task line. Existing notes
+without that exact generated line are not bulk-migrated. If the checked or
+cancelled task would update the PDF marker, `sync --dry-run` previews
+`pdf_marker_action: would-update`, plain `sync` refuses before writes, and
+targeted `sync --write-pdf` writes the marker. `scan --dry-run` previews this
+work. A writing scan keeps the default note-only refusal unless `--write-pdfs`
+is supplied.
 
 Generated blocks use Obsidian block IDs beginning with `^h-`. The MVP ID is a
 deterministic content hash over source PDF path, page label, annotation kind,
@@ -731,9 +731,9 @@ PDF marker:
 bob highlights sync ~/bob/lib/books/example.pdf --prefer frontmatter --write-pdf
 ```
 
-If the only change is frontmatter, the generated task line uses `[x]` or `[X]`,
-or a dry-run auto-merge reports `pdf_marker_action: would-update`, review the
-marker first, back up the PDF, then run the targeted write:
+If the only change is frontmatter, the generated task line uses `[x]`, `[X]`,
+or `[-]`, or a dry-run auto-merge reports `pdf_marker_action: would-update`,
+review the marker first, back up the PDF, then run the targeted write:
 
 ```bash
 bob highlights sync ~/bob/lib/books/example.pdf --write-pdf
@@ -771,8 +771,9 @@ preflight failures remain hard global failures before writes.
 | `duplicate marker key on line` | The marker repeats a normalized key. | Keep only one value for that key. |
 | `output path collision(s) detected before writes` | Multiple PDFs would write the same reference note path, such as `ref/books/example.md`. | Rename or move one PDF before scanning. |
 | `refusing to modify dirty vault files` | Git reports dirty touched paths outside the allowed frontmatter and generated-task checkbox write-back case. | Commit, stash, or clean those paths. |
-| `reference note changed but --write-pdf was not supplied` | Frontmatter or the generated checked task contributes to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf` or reviewed bulk `scan --write-pdfs`. |
+| `reference note changed but --write-pdf was not supplied` | Frontmatter or the generated task contributes `status: read` or `status: abandoned` to the selected projection, so the PDF marker needs an opt-in write. | Back up the PDF, then run targeted `sync --write-pdf` or reviewed bulk `scan --write-pdfs`. |
 | `checked PDF task conflicts` | The generated task says `status: read`, but marker or frontmatter changed `status` to another value from the stored base. | Uncheck the task or set the marker/frontmatter status to `read`. |
+| `cancelled PDF task conflicts` | The generated task says `status: abandoned`, but marker or frontmatter changed `status` to another value from the stored base. | Uncancel the task or set the marker/frontmatter status to `abandoned`. |
 | `marker/frontmatter conflict` | Marker and frontmatter changed the same field differently, or the note has no stored base snapshot for a safe merge. | Inspect both sides, then rerun with `--prefer marker` or `--prefer frontmatter --write-pdf`. |
 | `changed during sync; rerun` | The note or PDF changed after planning and before writing. | Rerun after closing or pausing apps that may touch the file. |
 | `scan completed with ... per-PDF failure(s)` | A recursive scan finished reporting or writing valid PDFs, but at least one PDF had a `plan_error` or `write_failure`. | Fix the named PDFs and rerun; review successful writes before assuming the scan wrote nothing. |

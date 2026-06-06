@@ -2976,7 +2976,7 @@ fn highlights_ref_deprecated_done_status_migrates_to_read_with_pdf_write() {
 }
 
 #[test]
-fn highlights_ref_scan_tolerates_cancelled_generated_pdf_task() {
+fn highlights_ref_task_cancelled_dry_run_requires_and_writes_pdf_marker() {
     let temp = TempDir::new("bob-cli-highlights-ref-task-cancelled");
     let vault = temp.path().join("vault");
     let pdf = vault.join("lib/example.pdf");
@@ -2998,6 +2998,34 @@ fn highlights_ref_scan_tolerates_cancelled_generated_pdf_task() {
         "- [-] #task [[lib/example.pdf]] [p::2] [cancelled:: 2026-06-04] ^task",
     );
     write_file(&note, &cancelled_note);
+    let marker_before = pdf_marker_contents(&pdf);
+    let pdf_hash_before_write = sha256_file(&pdf);
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--dry-run")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run sync cancelled task");
+
+    assert_success(&output);
+    let dry_run = stdout(&output);
+    assert!(
+        dry_run.contains("pdf_task: cancelled")
+            && dry_run.contains("pdf_task_contribution: status=abandoned")
+            && dry_run.contains("note_action: update")
+            && dry_run.contains("pdf_marker_action: would-update")
+            && dry_run.contains("writes: none"),
+        "expected cancelled-task dry-run update preview:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(
+        fs::read_to_string(&note).expect("read note"),
+        cancelled_note
+    );
 
     let output = bob_command()
         .arg("highlights")
@@ -3010,10 +3038,12 @@ fn highlights_ref_scan_tolerates_cancelled_generated_pdf_task() {
     assert_success(&output);
     let report = stdout(&output);
     assert!(
-        report.contains("pdf_task: unchecked")
+        report.contains("pdf_task: cancelled")
+            && report.contains("pdf_task_contribution: status=abandoned")
             && report.contains("notes_update: 1")
+            && report.contains("pdf_marker_action: would-update")
             && report.contains("writes: none"),
-        "expected cancelled task scan to plan successfully:\n{}",
+        "expected cancelled task scan dry-run to preview marker work:\n{}",
         format_output(&output)
     );
     assert!(
@@ -3024,6 +3054,150 @@ fn highlights_ref_scan_tolerates_cancelled_generated_pdf_task() {
     assert_eq!(
         fs::read_to_string(&note).expect("read note after dry run"),
         cancelled_note
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("cancelled task sync without PDF writes");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "cancelled task should require --write-pdf:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("--write-pdf"),
+        "expected --write-pdf refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(
+        fs::read_to_string(&note).expect("read note"),
+        cancelled_note
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .arg("--write-pdf")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("cancelled task write-pdf sync");
+
+    assert_success(&output);
+    let report = stdout(&output);
+    assert!(
+        report.contains("pdf_task: cancelled")
+            && report.contains("pdf_task_contribution: status=abandoned")
+            && report.contains("pdf_marker_action: update")
+            && report.contains("writes: note,pdf"),
+        "expected cancelled-task write-pdf sync to write note and PDF marker:\n{}",
+        format_output(&output)
+    );
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: abandoned\n"), "{marker}");
+    let pdf_hash_after_write = sha256_file(&pdf);
+    assert_ne!(
+        pdf_hash_before_write, pdf_hash_after_write,
+        "PDF marker write should refresh the source PDF hash"
+    );
+    let note_after_write = fs::read_to_string(&note).expect("read note");
+    assert!(
+        note_after_write.contains("status: abandoned\n"),
+        "{note_after_write}"
+    );
+    assert!(
+        note_after_write.contains(
+            "- [-] #task [[lib/example.pdf]] [p::2] [cancelled:: 2026-06-04] ^task\n"
+        ),
+        "{note_after_write}"
+    );
+    assert!(
+        note_after_write
+            .contains(&format!("source_pdf_sha256: {pdf_hash_after_write}\n")),
+        "note should record post-write PDF hash:\n{note_after_write}"
+    );
+    assert!(
+        !note_after_write
+            .contains(&format!("source_pdf_sha256: {pdf_hash_before_write}\n")),
+        "note should not retain pre-write PDF hash:\n{note_after_write}"
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("repeat cancelled task sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "cancelled-task write-back should settle:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn highlights_ref_task_cancelled_scan_write_pdfs_writes_pdf_marker() {
+    let temp = TempDir::new("bob-cli-highlights-ref-task-cancelled-scan");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights sync"),
+    );
+
+    let cancelled_note = fs::read_to_string(&note)
+        .expect("read ref note")
+        .replace("- [ ] #task", "- [-] #task");
+    write_file(&note, &cancelled_note);
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("scan")
+        .arg("--write-pdfs")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("cancelled task write-pdfs scan");
+
+    assert_success(&output);
+    let report = stdout(&output);
+    assert!(
+        report.contains("write_pdfs: true")
+            && report.contains("pdf_task: cancelled")
+            && report.contains("pdf_task_contribution: status=abandoned")
+            && report.contains("pdf_markers_updated: 1")
+            && report.contains("writes: note,pdf"),
+        "expected scan --write-pdfs to write abandoned note and PDF marker:\n{}",
+        format_output(&output)
+    );
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: abandoned\n"), "{marker}");
+    let note_after_write = fs::read_to_string(&note).expect("read note");
+    assert!(
+        note_after_write.contains("status: abandoned\n"),
+        "{note_after_write}"
+    );
+    assert!(
+        note_after_write
+            .contains("- [-] #task [[lib/example.pdf]] [p::2] ^task\n"),
+        "{note_after_write}"
     );
 }
 
@@ -3344,6 +3518,128 @@ fn highlights_ref_task_checked_competing_status_edits_fail() {
             note_before
         );
         assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    }
+}
+
+#[test]
+fn highlights_ref_task_cancelled_competing_status_edits_fail() {
+    for source in ["marker", "frontmatter"] {
+        let temp = TempDir::new(&format!(
+            "bob-cli-highlights-ref-task-cancelled-conflict-{source}"
+        ));
+        let vault = temp.path().join("vault");
+        let pdf = vault.join("lib/example.pdf");
+        let note = vault.join("ref/example.md");
+        write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
+        assert_success(
+            &bob_command()
+                .arg("highlights")
+                .arg("sync")
+                .arg(&pdf)
+                .env("BOB_DIR", &vault)
+                .output()
+                .expect("initial highlights sync"),
+        );
+
+        let mut edited = fs::read_to_string(&note)
+            .expect("read ref note")
+            .replace("- [ ] #task", "- [-] #task");
+        if source == "frontmatter" {
+            edited = edited.replace("status: wip", "status: read");
+        } else {
+            set_pdf_marker_contents(
+                &pdf,
+                "- status: read\n- parent: obsidian\n",
+            );
+        }
+        write_file(&note, &edited);
+        let note_before = fs::read_to_string(&note).expect("read note before");
+        let marker_before = pdf_marker_contents(&pdf);
+
+        let output = bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .arg("--write-pdf")
+            .env("BOB_DIR", &vault)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("sync cancelled task conflict for {source}: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "cancelled task conflict should fail for {source}:\n{}",
+            format_output(&output)
+        );
+        assert!(
+            stderr(&output).contains("cancelled PDF task conflicts")
+                && stderr(&output)
+                    .contains(&format!("{source} status=\"read\"")),
+            "expected cancelled-task conflict report for {source}:\n{}",
+            format_output(&output)
+        );
+        assert_eq!(
+            fs::read_to_string(&note).expect("read note after conflict"),
+            note_before
+        );
+        assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    }
+}
+
+#[test]
+fn highlights_ref_status_abandoned_rewrites_generated_task_to_cancelled() {
+    for source in ["marker", "frontmatter"] {
+        let temp = TempDir::new(&format!(
+            "bob-cli-highlights-ref-abandoned-task-render-{source}"
+        ));
+        let vault = temp.path().join("vault");
+        let pdf = vault.join("lib/example.pdf");
+        let note = vault.join("ref/example.md");
+        write_highlights_pdf(&pdf, "- status: wip\n- parent: obsidian\n");
+        assert_success(
+            &bob_command()
+                .arg("highlights")
+                .arg("sync")
+                .arg(&pdf)
+                .env("BOB_DIR", &vault)
+                .output()
+                .expect("initial highlights sync"),
+        );
+
+        if source == "frontmatter" {
+            let edited = fs::read_to_string(&note)
+                .expect("read ref note")
+                .replace("status: wip", "status: abandoned");
+            write_file(&note, &edited);
+        } else {
+            set_pdf_marker_contents(
+                &pdf,
+                "- status: abandoned\n- parent: obsidian\n",
+            );
+        }
+
+        let output = bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .arg("--write-pdf")
+            .env("BOB_DIR", &vault)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("sync abandoned status render for {source}: {error}")
+            });
+
+        assert_success(&output);
+        let marker = pdf_marker_contents(&pdf);
+        assert!(marker.contains("- status: abandoned\n"), "{marker}");
+        let contents = fs::read_to_string(&note).expect("read synced note");
+        assert!(contents.contains("status: abandoned\n"), "{contents}");
+        assert!(
+            contents.contains("- [-] #task [[lib/example.pdf]] [p::2] ^task\n"),
+            "{contents}"
+        );
     }
 }
 

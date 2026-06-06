@@ -160,6 +160,10 @@ Existing migrated notes may also carry `legacy_status` frontmatter to preserve
 the previous value; it is not a standard marker-synced field. Generated
 reference notes always include `type: "[[ref]]"` and include command-managed
 `ref_type` when it can be derived from the first library path component.
+The generated PDF task line is a status affordance: `[x]`/`[X]` contributes
+`status: read`, `[-]` contributes `status: abandoned`, and `[ ]` contributes no
+replacement status. PDF marker write-back for task-derived status still
+requires targeted `--write-pdf` or reviewed bulk `scan --write-pdfs`.
 
 For `lib/books/foo.pdf`, `sync` discovers `lib/books/foo.md` first and can
 parse simple `foo.textbundle/text.md` or `text.markdown` sidecars. Highlights,

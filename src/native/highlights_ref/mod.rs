@@ -178,17 +178,80 @@ struct PdfTaskLine {
     mark: char,
 }
 
+impl PdfTaskLine {
+    fn status(self) -> PdfTaskStatus {
+        match self.mark {
+            'x' | 'X' => PdfTaskStatus::Read,
+            '-' => PdfTaskStatus::Abandoned,
+            _ => PdfTaskStatus::Unchecked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PdfTaskLineState {
     Missing,
     Present(PdfTaskLine),
 }
 
+impl PdfTaskLineState {
+    fn status(self) -> PdfTaskStatus {
+        match self {
+            PdfTaskLineState::Missing => PdfTaskStatus::Missing,
+            PdfTaskLineState::Present(task_line) => task_line.status(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PdfTaskCompletion {
-    found: bool,
-    checked: bool,
-    status_contributed: bool,
+enum PdfTaskStatus {
+    Missing,
+    Unchecked,
+    Read,
+    Abandoned,
+}
+
+impl PdfTaskStatus {
+    fn target_status(self) -> Option<&'static str> {
+        match self {
+            PdfTaskStatus::Read => Some(STATUS_READ),
+            PdfTaskStatus::Abandoned => Some(STATUS_ABANDONED),
+            PdfTaskStatus::Missing | PdfTaskStatus::Unchecked => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PdfTaskStatus::Missing => "missing",
+            PdfTaskStatus::Unchecked => "unchecked",
+            PdfTaskStatus::Read => "checked",
+            PdfTaskStatus::Abandoned => "cancelled",
+        }
+    }
+
+    fn contribution_reason(self) -> Option<&'static str> {
+        match self {
+            PdfTaskStatus::Read => Some("checked PDF task set status read"),
+            PdfTaskStatus::Abandoned => {
+                Some("cancelled PDF task set status abandoned")
+            }
+            PdfTaskStatus::Missing | PdfTaskStatus::Unchecked => None,
+        }
+    }
+
+    fn conflict_action(self) -> &'static str {
+        match self {
+            PdfTaskStatus::Read => "uncheck",
+            PdfTaskStatus::Abandoned => "uncancel",
+            PdfTaskStatus::Missing | PdfTaskStatus::Unchecked => "clear",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PdfTaskStatusSignal {
+    status: PdfTaskStatus,
+    status_contributed: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +365,7 @@ struct PdfSyncPlan {
     rendered_body: String,
     stable_rendered_note: String,
     stable_note_action: &'static str,
-    pdf_task_completion: PdfTaskCompletion,
+    pdf_task_signal: PdfTaskStatusSignal,
     status_normalization: StatusNormalization,
 }
 
@@ -661,7 +724,7 @@ fn plan_pdf_sync(
         note_exists: note.exists(),
         prefer: options.prefer,
     })?;
-    let pdf_task_completion = apply_pdf_task_completion_signal(
+    let pdf_task_signal = apply_pdf_task_status_signal(
         &mut resolution,
         &pdf_task_line,
         base_projection.as_ref(),
@@ -739,7 +802,7 @@ fn plan_pdf_sync(
         rendered_body,
         stable_rendered_note,
         stable_note_action,
-        pdf_task_completion,
+        pdf_task_signal,
         status_normalization,
     })
 }
@@ -882,12 +945,9 @@ fn print_pdf_sync_report(
     println!("marker_note: {}", plan.marker.note_number);
     println!("sync_source: {}", plan.decision.source.as_str());
     println!("sync_reason: {}", plan.decision.reason);
-    println!(
-        "pdf_task: {}",
-        pdf_task_completion_label(plan.pdf_task_completion)
-    );
-    if plan.pdf_task_completion.status_contributed {
-        println!("pdf_task_contribution: status=read");
+    println!("pdf_task: {}", plan.pdf_task_signal.status.label());
+    if let Some(status) = plan.pdf_task_signal.status_contributed {
+        println!("pdf_task_contribution: status={status}");
     }
     if let Some(label) = status_normalization_label(plan.status_normalization) {
         println!("status_normalization: {label}");
@@ -919,14 +979,6 @@ fn write_summary(report: SyncWriteReport) -> &'static str {
         ("none", true) => "pdf",
         (_, false) => "note",
         (_, true) => "note,pdf",
-    }
-}
-
-fn pdf_task_completion_label(completion: PdfTaskCompletion) -> &'static str {
-    match (completion.found, completion.checked) {
-        (false, _) => "missing",
-        (true, false) => "unchecked",
-        (true, true) => "checked",
     }
 }
 
@@ -965,12 +1017,9 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     if plan.decision.source == SyncSource::AutoMerge {
         println!("  sync_reason: {}", plan.decision.reason);
     }
-    println!(
-        "  pdf_task: {}",
-        pdf_task_completion_label(plan.pdf_task_completion)
-    );
-    if plan.pdf_task_completion.status_contributed {
-        println!("  pdf_task_contribution: status=read");
+    println!("  pdf_task: {}", plan.pdf_task_signal.status.label());
+    if let Some(status) = plan.pdf_task_signal.status_contributed {
+        println!("  pdf_task_contribution: status={status}");
     }
     if let Some(label) = status_normalization_label(plan.status_normalization) {
         println!("  status_normalization: {label}");
@@ -1540,7 +1589,7 @@ fn bodies_differ_only_by_pdf_task_checkbox(
         Ok(PdfTaskLineState::Present(task_line)) => task_line,
         _ => return false,
     };
-    if base_task.checked == current_task.checked {
+    if base_task.mark == current_task.mark {
         return false;
     }
 
@@ -2349,63 +2398,67 @@ fn contains_pdf_wikilink(line: &str) -> bool {
     false
 }
 
-fn apply_pdf_task_completion_signal(
+fn apply_pdf_task_status_signal(
     resolution: &mut SyncResolution,
     task_line: &PdfTaskLineState,
     base_projection: Option<&Projection>,
     marker_projection: &Projection,
     frontmatter_projection: &Projection,
-) -> Result<PdfTaskCompletion> {
-    let checked = matches!(
-        task_line,
-        PdfTaskLineState::Present(PdfTaskLine { checked: true, .. })
-    );
-    let mut completion = PdfTaskCompletion {
-        found: matches!(task_line, PdfTaskLineState::Present(_)),
-        checked,
-        status_contributed: false,
+) -> Result<PdfTaskStatusSignal> {
+    let status = task_line.status();
+    let mut signal = PdfTaskStatusSignal {
+        status,
+        status_contributed: None,
     };
-    if !checked || projection_status_is_read(&resolution.projection) {
-        return Ok(completion);
+    let Some(target_status) = status.target_status() else {
+        return Ok(signal);
+    };
+    if projection_status_is(&resolution.projection, target_status) {
+        return Ok(signal);
     }
 
-    let conflicts = checked_task_status_conflicts(
+    let conflicts = pdf_task_status_conflicts(
         base_projection,
         marker_projection,
         frontmatter_projection,
+        target_status,
     );
     if !conflicts.is_empty() {
-        return Err(checked_task_status_conflict_error(&conflicts));
+        return Err(pdf_task_status_conflict_error(
+            status,
+            target_status,
+            &conflicts,
+        ));
     }
 
     resolution.projection.insert(
         FIELD_STATUS.to_string(),
-        MarkerValue::String(STATUS_READ.to_string()),
+        MarkerValue::String(target_status.to_string()),
     );
     resolution.decision.frontmatter_contributed = true;
     if !resolution.decision.reason.is_empty() {
         resolution.decision.reason.push_str("; ");
     }
-    resolution
-        .decision
-        .reason
-        .push_str("checked PDF task set status read");
-    completion.status_contributed = true;
-    Ok(completion)
+    if let Some(reason) = status.contribution_reason() {
+        resolution.decision.reason.push_str(reason);
+    }
+    signal.status_contributed = Some(target_status);
+    Ok(signal)
 }
 
 #[derive(Debug, Clone)]
-struct CheckedTaskStatusConflict {
+struct PdfTaskStatusConflict {
     source: &'static str,
     base: Option<MarkerValue>,
     value: Option<MarkerValue>,
 }
 
-fn checked_task_status_conflicts(
+fn pdf_task_status_conflicts(
     base_projection: Option<&Projection>,
     marker_projection: &Projection,
     frontmatter_projection: &Projection,
-) -> Vec<CheckedTaskStatusConflict> {
+    target_status: &str,
+) -> Vec<PdfTaskStatusConflict> {
     let Some(base_projection) = base_projection else {
         return Vec::new();
     };
@@ -2417,8 +2470,8 @@ fn checked_task_status_conflicts(
     ] {
         let base = base_projection.get(FIELD_STATUS);
         let value = projection.get(FIELD_STATUS);
-        if value != base && !status_value_is_read(value) {
-            conflicts.push(CheckedTaskStatusConflict {
+        if value != base && !status_value_is(value, target_status) {
+            conflicts.push(PdfTaskStatusConflict {
                 source,
                 base: base.cloned(),
                 value: value.cloned(),
@@ -2428,11 +2481,14 @@ fn checked_task_status_conflicts(
     conflicts
 }
 
-fn checked_task_status_conflict_error(
-    conflicts: &[CheckedTaskStatusConflict],
+fn pdf_task_status_conflict_error(
+    status: PdfTaskStatus,
+    target_status: &str,
+    conflicts: &[PdfTaskStatusConflict],
 ) -> CommandError {
-    let mut message = String::from(
-        "checked PDF task conflicts with marker/frontmatter status edit:",
+    let mut message = format!(
+        "{} PDF task conflicts with marker/frontmatter status edit:",
+        status.label()
     );
     for conflict in conflicts.iter().take(4) {
         message.push_str(&format!(
@@ -2442,18 +2498,30 @@ fn checked_task_status_conflict_error(
             diagnostic_projection_value(conflict.base.as_ref()),
         ));
     }
-    message.push_str(
-        "\nuncheck the PDF task or set the marker/frontmatter status to read",
-    );
+    message.push_str(&format!(
+        "\n{} the PDF task or set the marker/frontmatter status to {target_status}",
+        status.conflict_action()
+    ));
     CommandError::new(message)
 }
 
-fn projection_status_is_read(projection: &Projection) -> bool {
-    status_value_is_read(projection.get(FIELD_STATUS))
+fn projection_status_is(projection: &Projection, status: &str) -> bool {
+    status_value_is(projection.get(FIELD_STATUS), status)
 }
 
-fn status_value_is_read(value: Option<&MarkerValue>) -> bool {
-    value.and_then(MarkerValue::as_string) == Some(STATUS_READ)
+fn projection_pdf_task_mark(projection: &Projection) -> char {
+    match projection
+        .get(FIELD_STATUS)
+        .and_then(MarkerValue::as_string)
+    {
+        Some(STATUS_READ) => 'x',
+        Some(STATUS_ABANDONED) => '-',
+        _ => ' ',
+    }
+}
+
+fn status_value_is(value: Option<&MarkerValue>, status: &str) -> bool {
+    value.and_then(MarkerValue::as_string) == Some(status)
 }
 
 fn resolve_sync_projection(inputs: SyncInputs<'_>) -> Result<SyncResolution> {
@@ -3210,14 +3278,13 @@ impl ParsedNote {
         };
 
         let Some(rendered_highlights) = rendered_highlights else {
-            return rewrite_pdf_task_checkbox(
-                &self.body,
-                projection_status_is_read(projection),
+            return rewrite_pdf_task_checkbox_for_projection(
+                &self.body, projection,
             );
         };
         let replacement = rendered_highlights.content.as_str();
         let body = replace_managed_region(&self.body, replacement)?;
-        rewrite_pdf_task_checkbox(&body, projection_status_is_read(projection))
+        rewrite_pdf_task_checkbox_for_projection(&body, projection)
     }
 
     fn managed_region(&self) -> Result<Option<&str>> {
@@ -3291,11 +3358,9 @@ fn default_note_body(
     body.push_str("# ");
     body.push_str(&title);
     body.push_str("\n\n");
-    if projection_status_is_read(projection) {
-        body.push_str("- [x] #task [[");
-    } else {
-        body.push_str("- [ ] #task [[");
-    }
+    body.push_str("- [");
+    body.push(projection_pdf_task_mark(projection));
+    body.push_str("] #task [[");
     body.push_str(source_pdf);
     body.push_str("]] ");
     body.push_str(PDF_TASK_PRIORITY);
@@ -3397,8 +3462,11 @@ fn replace_managed_region(body: &str, replacement: &str) -> Result<String> {
     Ok(rendered)
 }
 
-fn rewrite_pdf_task_checkbox(body: &str, checked: bool) -> Result<String> {
-    replace_pdf_task_checkbox_mark(body, if checked { 'x' } else { ' ' })
+fn rewrite_pdf_task_checkbox_for_projection(
+    body: &str,
+    projection: &Projection,
+) -> Result<String> {
+    replace_pdf_task_checkbox_mark(body, projection_pdf_task_mark(projection))
 }
 
 fn replace_pdf_task_checkbox_mark(body: &str, mark: char) -> Result<String> {
@@ -4749,6 +4817,7 @@ Body
             super::PdfTaskLineState::Present(task) => {
                 assert_eq!(task.line_index, 2);
                 assert!(!task.checked);
+                assert_eq!(task.status(), super::PdfTaskStatus::Unchecked);
             }
             super::PdfTaskLineState::Missing => panic!("expected task line"),
         }
@@ -4758,7 +4827,10 @@ Body
         )
         .expect("parse checked task");
         match checked {
-            super::PdfTaskLineState::Present(task) => assert!(task.checked),
+            super::PdfTaskLineState::Present(task) => {
+                assert!(task.checked);
+                assert_eq!(task.status(), super::PdfTaskStatus::Read);
+            }
             super::PdfTaskLineState::Missing => panic!("expected task line"),
         }
 
@@ -4770,6 +4842,7 @@ Body
             super::PdfTaskLineState::Present(task) => {
                 assert_eq!(task.mark, '-');
                 assert!(!task.checked);
+                assert_eq!(task.status(), super::PdfTaskStatus::Abandoned);
             }
             super::PdfTaskLineState::Missing => panic!("expected task line"),
         }
@@ -4824,7 +4897,64 @@ Body
     }
 
     #[test]
+    fn highlights_ref_pdf_task_status_signal_contributes_abandoned() {
+        let base = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let mut resolution = super::SyncResolution {
+            decision: super::SyncDecision {
+                source: super::SyncSource::AutoMerge,
+                reason: "marker/frontmatter unchanged".to_string(),
+                marker_contributed: false,
+                frontmatter_contributed: false,
+            },
+            projection: base.clone(),
+        };
+        let task = super::parse_pdf_task_line(
+            "- [-] #task [[lib/books/example.pdf]] [p::2] ^task\n",
+        )
+        .expect("parse cancelled task");
+
+        let signal = super::apply_pdf_task_status_signal(
+            &mut resolution,
+            &task,
+            Some(&base),
+            &base,
+            &base,
+        )
+        .expect("apply cancelled task signal");
+
+        assert_eq!(signal.status, super::PdfTaskStatus::Abandoned);
+        assert_eq!(signal.status_contributed, Some(super::STATUS_ABANDONED));
+        assert_eq!(
+            resolution
+                .projection
+                .get(super::FIELD_STATUS)
+                .and_then(MarkerValue::as_string),
+            Some(super::STATUS_ABANDONED)
+        );
+        assert!(resolution.decision.frontmatter_contributed);
+        assert!(resolution
+            .decision
+            .reason
+            .contains("cancelled PDF task set status abandoned"));
+    }
+
+    #[test]
     fn highlights_ref_task_checkbox_rewrite_and_dirty_allowance_are_narrow() {
+        let read_projection = test_projection(vec![
+            ("status", string_value("read")),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let abandoned_projection = test_projection(vec![
+            ("status", string_value("abandoned")),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let wip_projection = test_projection(vec![
+            ("status", string_value("wip")),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
         let base_body = "\
 # Example
 
@@ -4841,9 +4971,25 @@ Body
             base_body,
             &checked_body
         ));
+        let cancelled_body_from_base = base_body.replace("- [ ]", "- [-]");
+        assert!(super::bodies_differ_only_by_pdf_task_checkbox(
+            base_body,
+            &cancelled_body_from_base
+        ));
+        assert!(super::bodies_differ_only_by_pdf_task_checkbox(
+            &checked_body,
+            &cancelled_body_from_base
+        ));
+        assert!(super::bodies_differ_only_by_pdf_task_checkbox(
+            &cancelled_body_from_base,
+            base_body
+        ));
 
-        let rewritten = super::rewrite_pdf_task_checkbox(base_body, true)
-            .expect("rewrite task checkbox");
+        let rewritten = super::rewrite_pdf_task_checkbox_for_projection(
+            base_body,
+            &read_projection,
+        )
+        .expect("rewrite task checkbox");
         assert!(rewritten.contains("- [x] #task [[lib/example.pdf]] ^task\n"));
 
         let prioritized_body = "\
@@ -4858,8 +5004,11 @@ Body
 <!-- highlights:end -->
 ";
         let prioritized_rewritten =
-            super::rewrite_pdf_task_checkbox(prioritized_body, true)
-                .expect("rewrite prioritized task checkbox");
+            super::rewrite_pdf_task_checkbox_for_projection(
+                prioritized_body,
+                &read_projection,
+            )
+            .expect("rewrite prioritized task checkbox");
         assert!(prioritized_rewritten
             .contains("- [x] #task [[lib/example.pdf]] [p::2] ^task\n"));
 
@@ -4875,17 +5024,31 @@ Body
 <!-- highlights:end -->
 ";
         let cancelled_checked =
-            super::rewrite_pdf_task_checkbox(cancelled_body, true)
-                .expect("rewrite cancelled task checkbox to checked");
+            super::rewrite_pdf_task_checkbox_for_projection(
+                cancelled_body,
+                &read_projection,
+            )
+            .expect("rewrite cancelled task checkbox to checked");
         assert!(cancelled_checked.contains(
             "- [x] #task [[lib/example.pdf]] [p::2] [cancelled:: 2026-06-04] [completion:: 2026-06-05] ^task\n"
         ));
         let cancelled_unchecked =
-            super::rewrite_pdf_task_checkbox(cancelled_body, false)
-                .expect("rewrite cancelled task checkbox to unchecked");
+            super::rewrite_pdf_task_checkbox_for_projection(
+                cancelled_body,
+                &wip_projection,
+            )
+            .expect("rewrite cancelled task checkbox to unchecked");
         assert!(cancelled_unchecked.contains(
             "- [ ] #task [[lib/example.pdf]] [p::2] [cancelled:: 2026-06-04] [completion:: 2026-06-05] ^task\n"
         ));
+        let unchecked_cancelled =
+            super::rewrite_pdf_task_checkbox_for_projection(
+                prioritized_body,
+                &abandoned_projection,
+            )
+            .expect("rewrite unchecked task checkbox to cancelled");
+        assert!(unchecked_cancelled
+            .contains("- [-] #task [[lib/example.pdf]] [p::2] ^task\n"));
 
         let unrelated_body = checked_body.replace("## Highlights", "Manual");
         assert!(!super::bodies_differ_only_by_pdf_task_checkbox(
