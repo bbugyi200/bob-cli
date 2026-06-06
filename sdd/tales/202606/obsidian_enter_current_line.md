@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-06 07:06:35
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_enter_current_line.md
 ---
 # Obsidian Vim Enter Current-Line Plan
@@ -140,3 +140,19 @@ console.log(JSON.stringify({
 }));
 NODE
 ```
+
+## Implementation Result
+
+Implemented the verification branch of this plan on 2026-06-06. The live vault source already contains the intended
+current-line Enter targeting behavior, so no files under `/home/bryan/bob` were changed.
+
+Verification completed:
+
+- `node -c /home/bryan/bob/.obsidian/plugins/bob-navigation-hotkeys/main.js`
+- `node -c /home/bryan/bob/.obsidian/plugins/task-status-cycler/main.js`
+- `git -C /home/bryan/bob diff --check -- .obsidian/plugins/bob-navigation-hotkeys/main.js .obsidian/plugins/task-status-cycler/main.js .obsidian.vimrc .obsidian/hotkeys.json`
+- Focused Node VM helper check returned:
+  `{"bareEmptyArgs":10,"bareNullArgs":10,"bareUndefinedRepeat":10,"explicitRepeat1":11,"explicitRepeat5":15,"backspaceBare":9}`
+
+Conclusion: if bare normal-mode Enter still targets the next line in a running Obsidian session, the likely cause is a
+stale loaded plugin runtime. Reload Obsidian or disable and re-enable `bob-navigation-hotkeys` and `task-status-cycler`.
