@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-06 08:27:18
-status: wip
+status: done
 prompt: sdd/prompts/202606/fix_new_note_parent_nan.md
 ---
 # Plan: Fix `new_note.md` Parent `NaN`
