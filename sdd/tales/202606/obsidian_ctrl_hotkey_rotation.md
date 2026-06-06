@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-06 08:12:23
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_ctrl_hotkey_rotation.md
 ---
 # Obsidian Ctrl Hotkey Rotation Plan
