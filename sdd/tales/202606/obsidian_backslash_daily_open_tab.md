@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-07 06:15:47
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_backslash_daily_open_tab.md
 ---
 # Plan: Reuse Open Daily Tab For Obsidian `\\`
