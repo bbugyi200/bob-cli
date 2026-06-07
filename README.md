@@ -170,7 +170,10 @@ parse simple `foo.textbundle/text.md` or `text.markdown` sidecars. Highlights,
 highlight comments, and standalone non-marker notes render into the managed
 `<!-- highlights:begin -->` region using stable `^h-...` block IDs. Existing
 manual body content outside that region is preserved, and disappeared generated
-blocks are kept as tombstones under `### Removed highlights`.
+blocks are kept as tombstones under `### Removed highlights`. Markdown bullet
+lines tagged with `#task` inside highlight comments or standalone non-marker
+notes also create top-level Obsidian tasks immediately under the generated PDF
+`^task` line, with a `[created::YYYY-MM-DD]` property.
 
 The full contract and MacBook setup guide live in
 [`docs/highlights-ref-sync.md`](docs/highlights-ref-sync.md).

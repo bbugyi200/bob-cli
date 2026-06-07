@@ -404,6 +404,30 @@ targeted `sync --write-pdf` writes the marker. `scan --dry-run` previews this
 work. A writing scan keeps the default note-only refusal unless `--write-pdfs`
 is supplied.
 
+Highlight comments and standalone non-marker notes can also create actionable
+Obsidian tasks. Any unordered Markdown bullet line whose item text contains
+`#task` as a whitespace-delimited token is copied to a top-level unchecked task
+immediately under the generated PDF `^task` line:
+
+```md
+- #task Compare this claim with the appendix.
+- [x] #task Email the citation to Alex.
+```
+
+becomes:
+
+```md
+- [ ] #task Compare this claim with the appendix. [created::2026-06-07]
+- [ ] #task Email the citation to Alex. [created::2026-06-07]
+```
+
+These annotation-created tasks are sibling top-level tasks, not subtasks of the
+PDF reading-status task. They are created once by normalized task text; later
+syncs preserve existing checkbox state and task properties such as
+`[completion::]`, `[cancelled::]`, `[due::]`, or edited priority fields.
+Completing or cancelling these annotation-created tasks does not update the PDF
+marker or reference-note reading status.
+
 Generated blocks use Obsidian block IDs beginning with `^h-`. The MVP ID is a
 deterministic content hash over source PDF path, page label, annotation kind,
 sidecar order on the page, and quote/note text. Highlight comments are not part
@@ -508,6 +532,8 @@ The sync model is deliberately asymmetric:
 - Marker/frontmatter fields are 2-way and can conflict.
 - Highlights, highlight comments, and standalone non-marker notes are PDF or
   sidecar to reference note only.
+- Annotation-created `#task` bullets are created in the reference note only and
+  do not sync completion state back to the PDF marker.
 - Edits inside the managed `<!-- highlights:begin -->` region in Obsidian may be
   overwritten.
 

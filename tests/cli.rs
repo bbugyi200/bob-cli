@@ -7,6 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use chrono::Local;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -4107,6 +4108,154 @@ Some note...
         "linked marker mirror fields should not render as a comment:\n{contents}"
     );
     assert_eq!(highlight_block_ids(&contents).len(), 2, "{contents}");
+}
+
+#[test]
+fn highlights_ref_sync_creates_tasks_from_pdf_note_task_bullets() {
+    let temp = TempDir::new("bob-cli-highlights-ref-note-tasks");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/task-notes.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/task-notes.md");
+    let created = Local::now().format("%Y-%m-%d").to_string();
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Task Notes\n",
+    );
+    write_file(
+        &sidecar,
+        "\
+# Task Notes
+
+## Page 4
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Highlighted claim.
+
+- #task Reconcile with chapter 3.
+- Keep this bullet as a comment.
+
+---
+
+Note:
+- #task Ask about the standalone note.
+* #task Capture the second standalone task.
+- Untagged standalone bullet.
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync sidecar task bullets");
+
+    assert_success(&output);
+    let mut contents = fs::read_to_string(&note).expect("read generated note");
+    let expected_task_block = format!(
+        "\
+- [ ] #task [[lib/books/task-notes.pdf]] [p::2] ^task
+- [ ] #task Reconcile with chapter 3. [created::{created}]
+- [ ] #task Ask about the standalone note. [created::{created}]
+- [ ] #task Capture the second standalone task. [created::{created}]
+"
+    );
+    assert!(contents.contains(&expected_task_block), "{contents}");
+    assert!(
+        contents.contains(
+            "> [comment] #task Reconcile with chapter 3.\n> Keep this bullet as a comment.\n"
+        ),
+        "{contents}"
+    );
+    assert!(
+        contents.contains(
+            "> [note] - #task Ask about the standalone note.\n> * #task Capture the second standalone task.\n> - Untagged standalone bullet.\n"
+        ),
+        "{contents}"
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("resync sidecar task bullets");
+    assert_success(&output);
+    contents = fs::read_to_string(&note).expect("read resynced note");
+    assert_eq!(
+        contents
+            .lines()
+            .filter(|line| line.starts_with("- [ ] #task Reconcile"))
+            .count(),
+        1,
+        "{contents}"
+    );
+
+    let completed_line =
+        format!("- [ ] #task Reconcile with chapter 3. [created::{created}]");
+    let cancelled_line = format!(
+        "- [ ] #task Ask about the standalone note. [created::{created}]"
+    );
+    let edited = contents
+        .replace(
+            &completed_line,
+            &format!(
+                "- [x] #task Reconcile with chapter 3. [created::{created}] [completion::2026-06-08]"
+            ),
+        )
+        .replace(
+            &cancelled_line,
+            &format!(
+                "- [-] #task Ask about the standalone note. [created::{created}] [cancelled::2026-06-08]"
+            ),
+        );
+    write_file(&note, &edited);
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("resync completed sidecar task bullets");
+    assert_success(&output);
+    let updated = fs::read_to_string(&note).expect("read updated note");
+    assert!(
+        updated.contains(&format!(
+            "- [x] #task Reconcile with chapter 3. [created::{created}] [completion::2026-06-08]"
+        )),
+        "{updated}"
+    );
+    assert!(
+        updated.contains(&format!(
+            "- [-] #task Ask about the standalone note. [created::{created}] [cancelled::2026-06-08]"
+        )),
+        "{updated}"
+    );
+    assert_eq!(
+        updated
+            .lines()
+            .filter(|line| line.starts_with("- [")
+                && line.contains("#task Reconcile with chapter 3."))
+            .count(),
+        1,
+        "{updated}"
+    );
+    assert_eq!(
+        updated
+            .lines()
+            .filter(|line| line.starts_with("- [")
+                && line.contains("#task Ask about the standalone note."))
+            .count(),
+        1,
+        "{updated}"
+    );
 }
 
 #[test]

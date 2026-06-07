@@ -10,7 +10,7 @@ use std::{
     thread,
 };
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{Local, SecondsFormat, Utc};
 use clap::{
     builder::OsStringValueParser, Arg, ArgAction, ArgMatches,
     Command as ClapCommand,
@@ -325,6 +325,7 @@ struct SidecarAnnotation {
     linked_page_style: bool,
     text: String,
     comment: Option<String>,
+    task_source: Option<String>,
     order: usize,
     ordinal_on_page: usize,
 }
@@ -345,6 +346,12 @@ enum SidecarAnnotationKind {
 struct RenderedHighlights {
     content: String,
     count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnnotationTaskCandidate {
+    identity: String,
+    task_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -772,6 +779,12 @@ fn plan_pdf_sync(
         &synced_projection,
         &stable_metadata.source_pdf,
         rendered_highlights.as_ref(),
+    )?;
+    let annotation_tasks = annotation_task_candidates(sidecar.as_ref());
+    let rendered_body = insert_missing_annotation_tasks(
+        &rendered_body,
+        &annotation_tasks,
+        &current_local_date(),
     )?;
     let stable_rendered_note = note.render_with_projection(
         &synced_projection,
@@ -1915,15 +1928,17 @@ fn parse_sidecar_chunk(
             .filter(|line| !is_markdown_heading(line))
             .cloned()
             .collect::<Vec<_>>();
-        let comment = normalize_annotation_text(&comment_lines);
+        let comment_source = normalize_annotation_text(&comment_lines);
+        let comment = strip_comment_label(&comment_source);
 
         return Some(SidecarAnnotation {
             kind: SidecarAnnotationKind::Highlight,
             page_label: page_label.map(str::to_string),
             linked_page_style,
             text,
-            comment: (!comment.is_empty())
-                .then(|| strip_comment_label(&comment)),
+            comment: (!comment.is_empty()).then_some(comment),
+            task_source: (!comment_source.is_empty())
+                .then(|| strip_comment_label_only(&comment_source)),
             order: 0,
             ordinal_on_page: 0,
         });
@@ -1941,6 +1956,7 @@ fn parse_sidecar_chunk(
         linked_page_style,
         text,
         comment: None,
+        task_source: None,
         order: 0,
         ordinal_on_page: 0,
     })
@@ -2225,13 +2241,17 @@ fn strip_standalone_note_marker(line: &str) -> String {
 }
 
 fn strip_comment_label(text: &str) -> String {
+    strip_comment_list_markers(&strip_comment_label_only(text))
+}
+
+fn strip_comment_label_only(text: &str) -> String {
     let trimmed = text.trim();
     for prefix in ["Comment:", "comment:", "Note:", "note:"] {
         if let Some(value) = trimmed.strip_prefix(prefix) {
-            return strip_comment_list_markers(value.trim_start());
+            return value.trim_start().to_string();
         }
     }
-    strip_comment_list_markers(text)
+    text.to_string()
 }
 
 fn strip_comment_list_markers(text: &str) -> String {
@@ -2263,10 +2283,22 @@ fn strip_comment_list_markers(text: &str) -> String {
 
 fn strip_unordered_list_marker(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    ["- ", "* "]
-        .iter()
-        .find_map(|marker| trimmed.strip_prefix(marker))
-        .map(str::trim_start)
+    let bytes = trimmed.as_bytes();
+    if !bytes
+        .first()
+        .is_some_and(|byte| matches!(byte, b'-' | b'*' | b'+'))
+    {
+        return None;
+    }
+    if !bytes.get(1).is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+
+    let mut index = 2usize;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    Some(&trimmed[index..])
 }
 
 fn normalize_annotation_text(lines: &[String]) -> String {
@@ -2288,6 +2320,155 @@ fn normalize_annotation_text(lines: &[String]) -> String {
 
 fn normalized_identity_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn annotation_task_candidates(
+    sidecar: Option<&SidecarInput>,
+) -> Vec<AnnotationTaskCandidate> {
+    let Some(sidecar) = sidecar else {
+        return Vec::new();
+    };
+
+    let mut skipped_marker_note = false;
+    let mut candidates = Vec::new();
+    for annotation in &sidecar.annotations {
+        if !skipped_marker_note && is_sidecar_marker_mirror(annotation) {
+            skipped_marker_note = true;
+            continue;
+        }
+
+        match annotation.kind {
+            SidecarAnnotationKind::Highlight => {
+                let Some(source) = annotation.task_source.as_deref() else {
+                    continue;
+                };
+                candidates.extend(annotation_task_candidates_from_text(source));
+            }
+            SidecarAnnotationKind::StandaloneNote => {
+                candidates.extend(annotation_task_candidates_from_text(
+                    &annotation.text,
+                ));
+            }
+        }
+    }
+    candidates
+}
+
+fn annotation_task_candidates_from_text(
+    text: &str,
+) -> Vec<AnnotationTaskCandidate> {
+    text.lines()
+        .filter_map(annotation_task_candidate_from_source_line)
+        .collect()
+}
+
+fn annotation_task_candidate_from_source_line(
+    line: &str,
+) -> Option<AnnotationTaskCandidate> {
+    let item = strip_unordered_list_marker(line)?;
+    let task_body = strip_optional_markdown_task_checkbox(item);
+    let task_text = normalized_identity_text(&strip_created_task_properties(
+        task_body.trim(),
+    ));
+    if !contains_markdown_token(&task_text, PDF_TASK_TAG) {
+        return None;
+    }
+
+    Some(AnnotationTaskCandidate {
+        identity: annotation_task_identity(&task_text)?,
+        task_text,
+    })
+}
+
+fn strip_optional_markdown_task_checkbox(item: &str) -> &str {
+    strip_markdown_task_checkbox(item).unwrap_or_else(|| item.trim_start())
+}
+
+fn strip_markdown_task_checkbox(item: &str) -> Option<&str> {
+    let trimmed = item.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'[' || bytes[2] != b']' {
+        return None;
+    }
+    if bytes.get(3).is_some_and(|byte| !byte.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(trimmed[3..].trim_start())
+}
+
+fn annotation_task_identity(task_text: &str) -> Option<String> {
+    let without_properties = strip_obsidian_task_properties(task_text);
+    let identity = normalized_identity_text(&without_properties);
+    contains_markdown_token(&identity, PDF_TASK_TAG).then_some(identity)
+}
+
+fn existing_annotation_task_identities(body: &str) -> BTreeSet<String> {
+    body.lines()
+        .filter_map(existing_annotation_task_identity)
+        .collect()
+}
+
+fn existing_annotation_task_identity(line: &str) -> Option<String> {
+    if line.as_bytes().first().is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+
+    let item = strip_unordered_list_marker(line)?;
+    let task_body = strip_markdown_task_checkbox(item)?;
+    if contains_markdown_token(task_body, PDF_TASK_BLOCK_ID) {
+        return None;
+    }
+    annotation_task_identity(task_body)
+}
+
+fn strip_created_task_properties(text: &str) -> String {
+    strip_matching_obsidian_task_properties(text, |key| {
+        key.eq_ignore_ascii_case("created")
+    })
+}
+
+fn strip_obsidian_task_properties(text: &str) -> String {
+    strip_matching_obsidian_task_properties(text, |_| true)
+}
+
+fn strip_matching_obsidian_task_properties(
+    text: &str,
+    should_strip: impl Fn(&str) -> bool,
+) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find('[') {
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find(']') else {
+            break;
+        };
+        let inside = &after_start[..end];
+        if let Some(key) = obsidian_task_property_key(inside)
+            && should_strip(key)
+        {
+            stripped.push_str(&remaining[..start]);
+            remaining = &after_start[end + 1..];
+            continue;
+        }
+
+        let bracket_end = start + 1;
+        stripped.push_str(&remaining[..bracket_end]);
+        remaining = &remaining[bracket_end..];
+    }
+
+    stripped.push_str(remaining);
+    stripped
+}
+
+fn obsidian_task_property_key(inside_brackets: &str) -> Option<&str> {
+    let (key, _) = inside_brackets.split_once("::")?;
+    let key = key.trim();
+    (!key.is_empty()
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+        }))
+    .then_some(key)
 }
 
 fn parse_pdf_task_line(body: &str) -> Result<PdfTaskLineState> {
@@ -3469,6 +3650,70 @@ fn rewrite_pdf_task_checkbox_for_projection(
     replace_pdf_task_checkbox_mark(body, projection_pdf_task_mark(projection))
 }
 
+fn insert_missing_annotation_tasks(
+    body: &str,
+    candidates: &[AnnotationTaskCandidate],
+    created_date: &str,
+) -> Result<String> {
+    if candidates.is_empty() {
+        return Ok(body.to_string());
+    }
+
+    let task_line = match parse_pdf_task_line(body)? {
+        PdfTaskLineState::Present(task_line) => task_line,
+        PdfTaskLineState::Missing => {
+            return Err(CommandError::new(
+                "reference note is missing the generated PDF task line with ^task; cannot create annotation tasks",
+            ));
+        }
+    };
+    let mut existing = existing_annotation_task_identities(body);
+    let mut missing = Vec::new();
+    for candidate in candidates {
+        if existing.insert(candidate.identity.clone()) {
+            missing.push(format!(
+                "- [ ] {} [created::{}]",
+                candidate.task_text, created_date
+            ));
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(body.to_string());
+    }
+
+    Ok(insert_lines_after(body, task_line.line_index, &missing))
+}
+
+fn insert_lines_after(
+    body: &str,
+    line_index: usize,
+    lines: &[String],
+) -> String {
+    let mut rendered = String::with_capacity(
+        body.len() + lines.iter().map(|line| line.len() + 1).sum::<usize>(),
+    );
+    for (index, segment) in body.split_inclusive('\n').enumerate() {
+        rendered.push_str(segment);
+        if index != line_index {
+            continue;
+        }
+
+        let (_, line_ending) = split_line_segment(segment);
+        let line_ending = if line_ending.is_empty() {
+            rendered.push('\n');
+            "\n"
+        } else {
+            line_ending
+        };
+        for line in lines {
+            rendered.push_str(line);
+            rendered.push_str(line_ending);
+        }
+    }
+    rendered
+}
+
 fn replace_pdf_task_checkbox_mark(body: &str, mark: char) -> Result<String> {
     let task_line = match parse_pdf_task_line(body)? {
         PdfTaskLineState::Missing => return Ok(body.to_string()),
@@ -3535,6 +3780,10 @@ fn is_valid_block_id(id: &str) -> bool {
 
 fn current_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn current_local_date() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
 }
 
 fn configured_path(
@@ -4894,6 +5143,104 @@ Body
                 .contains("multiple generated PDF task"),
             "{duplicate}"
         );
+    }
+
+    #[test]
+    fn annotation_task_candidates_extract_from_comments_and_notes() {
+        let annotations = parse_sidecar_markdown(
+            "\
+## Page 2
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Quote with a task comment.
+
+- #task Review the contradiction.
+- Ordinary comment bullet.
+
+---
+
+Note:
+- #task Follow up on the standalone note.
+- [x] #task Preserve accepted source checkboxes.
+- Untagged standalone bullet.
+",
+        );
+        let sidecar = super::SidecarInput {
+            path: PathBuf::from("example.md"),
+            annotations,
+        };
+
+        let candidates = super::annotation_task_candidates(Some(&sidecar));
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.task_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "#task Review the contradiction.",
+                "#task Follow up on the standalone note.",
+                "#task Preserve accepted source checkboxes.",
+            ]
+        );
+        assert_eq!(
+            sidecar.annotations[1].comment.as_deref(),
+            Some("#task Review the contradiction.\nOrdinary comment bullet.")
+        );
+    }
+
+    #[test]
+    fn annotation_task_insertion_is_idempotent_and_preserves_existing_states() {
+        let body = "\
+# Example
+
+- [ ] #task [[lib/example.pdf]] [p::2] ^task
+- [x] #task Existing done [created::2026-06-01] [completion::2026-06-02]
+- [-] #task Existing cancelled [created::2026-06-01] [cancelled::2026-06-02] [due::2026-06-03]
+
+## Manual Notes
+
+Keep me here.
+
+## Highlights
+
+<!-- highlights:begin -->
+
+<!-- highlights:end -->
+";
+        let candidates = super::annotation_task_candidates_from_text(
+            "\
+- #task Existing done
+- #task Existing cancelled
+- #task New follow-up [due::2026-06-08]
+",
+        );
+
+        let updated = super::insert_missing_annotation_tasks(
+            body,
+            &candidates,
+            "2026-06-07",
+        )
+        .expect("insert annotation tasks");
+
+        assert!(updated.contains(
+            "- [ ] #task [[lib/example.pdf]] [p::2] ^task\n- [ ] #task New follow-up [due::2026-06-08] [created::2026-06-07]\n"
+        ));
+        assert_eq!(updated.matches("#task Existing done").count(), 1);
+        assert_eq!(updated.matches("#task Existing cancelled").count(), 1);
+        assert!(updated.contains("## Manual Notes\n\nKeep me here."));
+        assert!(updated.contains("## Highlights\n\n<!-- highlights:begin -->"));
+
+        let rerun = super::insert_missing_annotation_tasks(
+            &updated,
+            &candidates,
+            "2026-06-07",
+        )
+        .expect("rerun annotation task insertion");
+        assert_eq!(rerun, updated);
     }
 
     #[test]

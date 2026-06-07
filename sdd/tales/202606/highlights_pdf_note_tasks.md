@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-07 10:48:49
-status: wip
+status: done
 prompt: sdd/prompts/202606/highlights_pdf_note_tasks.md
 ---
 # Plan: Create Obsidian Tasks from PDF Note Bullets
