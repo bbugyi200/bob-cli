@@ -217,7 +217,8 @@ fn day_date(day_file: &Path) -> NaiveDate {
 }
 
 fn parse_day_file_date(file_name: &str) -> Option<NaiveDate> {
-    let date_text = file_name.strip_suffix("_day.md")?;
+    let date_text = file_name.strip_suffix(".md")?;
+    let date_text = date_text.strip_suffix("_day").unwrap_or(date_text);
     if date_text.len() != 8
         || !date_text.bytes().all(|byte| byte.is_ascii_digit())
     {

@@ -5280,6 +5280,51 @@ fn tmux_pomodoro_formats_native_pomodoro_status() {
 }
 
 #[test]
+fn pomodoro_reads_default_bare_daily_file_from_bob_dir() {
+    let temp = TempDir::new("bob-cli-pomodoro-default-bare");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("2026/20260601.md"),
+        &fs::read_to_string(fixture("pomodoro/day_with_open_pomodoro.md"))
+            .expect("read pomodoro fixture"),
+    );
+
+    let output = bob_command()
+        .arg("pomodoro")
+        .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-01 09:10:01")
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run bob pomodoro with default bare daily path");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");
+}
+
+#[test]
+fn script_pomodoro_reads_default_bare_daily_file_from_bob_dir() {
+    let temp = TempDir::new("bob-cli-script-pomodoro-default-bare");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("2026/20260601.md"),
+        &fs::read_to_string(fixture("pomodoro/day_with_open_pomodoro.md"))
+            .expect("read pomodoro fixture"),
+    );
+
+    let output = bob_command()
+        .arg("pomodoro")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env("BOB_DIR", &vault)
+        .env("BOB_NOW", "2026-06-01 09:10:01")
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run script bob pomodoro with default bare daily path");
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "[<65m] 0945-1015 Review crate skeleton\n");
+}
+
+#[test]
 fn script_pomodoro_accepts_inline_duration_field_in_time_range() {
     let temp = TempDir::new("bob-cli-script-pomodoro");
     let output = bob_command()

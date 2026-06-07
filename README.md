@@ -181,8 +181,8 @@ bob pomodoro
 
 Prints the current Pomodoro ledger entry from today's Bob daily note, including
 time remaining or recent overdue status. It defaults to
-`$BOB_DIR/YYYY/YYYYMMDD_day.md`, or `~/bob/YYYY/YYYYMMDD_day.md` when `BOB_DIR`
-is unset, unless `BOB_DAY_FILE` is set.
+`$BOB_DIR/YYYY/YYYYMMDD.md`, or `~/bob/YYYY/YYYYMMDD.md` when `BOB_DIR` is
+unset, unless `BOB_DAY_FILE` is set.
 Ledger entries may use bold Markdown ranges such as
 `(**0945-1015** [t:: 30m])`; command output remains plain, for example
 `0945-1015 Review crate skeleton`.

@@ -64,7 +64,7 @@ pub fn current_datetime() -> NaiveDateTime {
 pub fn default_day_file(bob_dir: &Path) -> PathBuf {
     let today = current_datetime();
     bob_dir.join(format!("{:04}", today.year())).join(format!(
-        "{:04}{:02}{:02}_day.md",
+        "{:04}{:02}{:02}.md",
         today.year(),
         today.month(),
         today.day()

@@ -43,7 +43,14 @@ function get_day_file() {
     return
   fi
 
-  printf "%s/bob/%s_day.md\n" "${HOME}" "$(current_date +%Y/%Y%m%d)"
+  local bob_dir="${BOB_DIR:-${HOME}/bob}"
+  if [[ "${bob_dir}" == \~ ]]; then
+    bob_dir="${HOME}"
+  elif [[ "${bob_dir}" == \~/* ]]; then
+    bob_dir="${HOME}/${bob_dir#\~/}"
+  fi
+
+  printf "%s/%s.md\n" "${bob_dir%/}" "$(current_date +%Y/%Y%m%d)"
 }
 
 function print_help() {
@@ -59,9 +66,10 @@ daily note is missing, has no open Pomodoro, or the Pomodoro is more than nine
 minutes overdue.
 
 environment:
+  BOB_DIR       Bob vault path for the default daily note path
   BOB_DAY_FILE  exact daily note path to read
   BOB_NOW       override the current timestamp for status calculations
-  HOME          used for the default ~/bob daily note path
+  HOME          used when BOB_DIR is unset or starts with ~
 
 options:
   -d, --debug    enable debug tracing
@@ -75,7 +83,7 @@ function get_day_date() {
   local day_file_basename
   day_file_basename="$(basename "${day_file}")"
 
-  if [[ "${day_file_basename}" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})_day\.md$ ]]; then
+  if [[ "${day_file_basename}" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})(_day)?\.md$ ]]; then
     printf "%s-%s-%s\n" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
     return
   fi
