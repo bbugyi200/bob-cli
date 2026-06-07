@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-07 06:34:21
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_daily_activation_jump.md
 ---
 # Plan: Fix Obsidian Daily Tab Activation Jump
