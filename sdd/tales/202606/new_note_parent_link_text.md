@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-07 09:57:21
-status: wip
+status: done
 prompt: sdd/prompts/202606/new_note_parent_link_text.md
 ---
 # Plan: Hide `.md` In New Note Parent Link Text
