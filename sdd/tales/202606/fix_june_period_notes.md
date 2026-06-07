@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-07 08:51:16
-status: wip
+status: done
 prompt: sdd/prompts/202606/fix_june_period_notes.md
 ---
 # Plan: Fix June 2026 Daily and Period Notes
