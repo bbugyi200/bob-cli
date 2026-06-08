@@ -178,12 +178,14 @@ notes also create Obsidian tasks, but only when the resolved PDF status is
 route suffix (`A-Z`, `a-z`, `0-9`, `_`, and `-`, starting with an
 alphanumeric), the suffix is stripped and the task is appended to existing
 `~/bob/name.md` instead; routed target notes are never auto-created. Created
-tasks carry `[created::YYYY-MM-DD]`, `[highlight_task:: ...]`, and a `🔖` block
-backlink to the source highlight/note. Same-note backlinks use
-`[[#^h-...|🔖]]`; routed backlinks use a vault-relative target such as
-`[[ref/books/foo#^h-...|🔖]]`. The processed marker moves with completed,
-cancelled, or `bob move-done-tasks` archived tasks, so re-syncing does not
-recreate them without PDF or sidecar edits.
+tasks carry `[created::YYYY-MM-DD]` and a `🔖` backlink to a task-specific
+generated source anchor such as `[[ref/books/foo#^ht-...|🔖]]`. The backlink is
+the durable processed marker that moves with completed, cancelled, edited, or
+`bob move-done-tasks` archived tasks, so re-syncing does not recreate them
+without PDF or sidecar edits. Older `[highlight_task:: ...]` fields are still
+recognized for compatibility, but new tasks no longer write that property.
+Removing the source backlink removes the only durable no-property marker for a
+moved or heavily edited annotation task.
 
 The full contract and MacBook setup guide live in
 [`docs/highlights-ref-sync.md`](docs/highlights-ref-sync.md).

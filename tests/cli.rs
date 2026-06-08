@@ -4176,12 +4176,22 @@ Note:
             .to_string()
     };
     let source_link_id = |line: &str| -> String {
-        let marker = "[[#^";
-        let start =
-            line.find(marker).expect("source link present") + marker.len();
+        let start = line.find("[[").expect("source link present") + 2;
         let rest = &line[start..];
-        let end = rest.find(['|', ']']).expect("source link terminator");
-        rest[..end].to_string()
+        let end = rest.find("]]").expect("source link terminator");
+        let inside = &rest[..end];
+        let target =
+            inside.split_once('|').map_or(inside, |(target, _)| target);
+        target
+            .rsplit_once("#^")
+            .unwrap_or_else(|| panic!("source link has no block id: {line}"))
+            .1
+            .to_string()
+    };
+    let managed_source_anchor_exists = |contents: &str, id: &str| -> bool {
+        contents.lines().any(|line| {
+            line.starts_with("> ") && line.contains(&format!("^{id}"))
+        })
     };
 
     let reconcile_line =
@@ -4193,37 +4203,73 @@ Note:
         "#task Capture the second standalone task.",
     );
 
-    // Each created task carries a same-file block backlink and a created date.
+    // Each created task carries a vault-relative source-task backlink and a
+    // created date, without the legacy highlight_task property.
     for line in [&reconcile_line, &ask_line, &capture_line] {
-        assert!(line.contains("[[#^h-"), "missing source link: {line}");
+        assert!(
+            line.contains("[[ref/books/task-notes#^ht-"),
+            "missing source-task link: {line}"
+        );
+        assert!(
+            !line.contains("[highlight_task:: "),
+            "legacy processed marker should not be rendered: {line}"
+        );
         assert!(
             line.contains(&format!("[created::{created}]")),
             "missing created date: {line}"
         );
     }
 
-    // The link resolves: every id is a real block in the managed Highlights
-    // region. Both standalone bullets share the note's block; the comment task
-    // points at a distinct (highlight) block.
+    // The link resolves: every id is a real source-task block in the managed
+    // Highlights region. The source-task ids are task-specific, while the
+    // annotation-level h-... blocks are still rendered separately.
     let block_ids = highlight_block_ids(&contents);
     let reconcile_id = source_link_id(&reconcile_line);
     let ask_id = source_link_id(&ask_line);
     let capture_id = source_link_id(&capture_line);
-    assert!(block_ids.contains(&reconcile_id), "{contents}");
-    assert!(block_ids.contains(&ask_id), "{contents}");
-    assert_eq!(ask_id, capture_id, "standalone bullets share a block id");
-    assert_ne!(reconcile_id, ask_id, "comment and note blocks differ");
-
+    assert_eq!(block_ids.len(), 2, "{contents}");
     assert!(
-        contents.contains(
-            "> [comment] #task Reconcile with chapter 3.\n> Keep this bullet as a comment.\n"
-        ),
+        managed_source_anchor_exists(&contents, &reconcile_id),
         "{contents}"
     );
     assert!(
-        contents.contains(
-            "> [note] - #task Ask about the standalone note.\n> * #task Capture the second standalone task.\n> - Untagged standalone bullet.\n"
-        ),
+        managed_source_anchor_exists(&contents, &ask_id),
+        "{contents}"
+    );
+    assert!(
+        managed_source_anchor_exists(&contents, &capture_id),
+        "{contents}"
+    );
+    assert_ne!(ask_id, capture_id, "source-task ids are task-specific");
+    assert_ne!(reconcile_id, ask_id, "comment and note tasks differ");
+
+    assert!(
+        contents.lines().any(|line| {
+            line.starts_with("> [comment] #task Reconcile with chapter 3.")
+                && line.contains(" ^ht-")
+        }),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("> Keep this bullet as a comment.\n"),
+        "{contents}"
+    );
+    assert!(
+        contents.lines().any(|line| {
+            line.starts_with("> [note] - #task Ask about the standalone note.")
+                && line.contains(" ^ht-")
+        }),
+        "{contents}"
+    );
+    assert!(
+        contents.lines().any(|line| {
+            line.starts_with("> * #task Capture the second standalone task.")
+                && line.contains(" ^ht-")
+        }),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("> - Untagged standalone bullet.\n"),
         "{contents}"
     );
 
@@ -4296,6 +4342,93 @@ Note:
 }
 
 #[test]
+fn highlights_ref_sync_skips_legacy_highlight_task_property() {
+    let temp = TempDir::new("bob-cli-highlights-ref-legacy-task-property");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/legacy-task.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/legacy-task.md");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Legacy Task\n",
+    );
+    write_file(
+        &sidecar,
+        "\
+## Page 4
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Highlighted claim.
+
+- #task Legacy follow-up
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("initial sync sidecar legacy task");
+    assert_success(&output);
+    let contents = fs::read_to_string(&note).expect("read generated note");
+    let source_block_id = highlight_block_ids(&contents)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("missing source block id:\n{contents}"));
+    let legacy_id = legacy_highlight_task_id(
+        "ref/books/legacy-task.md",
+        &source_block_id,
+        "#task Legacy follow-up",
+    );
+    let created_line = contents
+        .lines()
+        .find(|line| line.starts_with("- [ ] #task Legacy follow-up"))
+        .unwrap_or_else(|| panic!("missing created task:\n{contents}"));
+    let legacy_line = format!(
+        "- [x] #task Edited legacy follow-up [[ref/books/legacy-task#^{source_block_id}|🔖]] [highlight_task:: {legacy_id}] [created::2026-06-01] [completion::2026-06-02]"
+    );
+    write_file(&note, &contents.replace(created_line, &legacy_line));
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("resync legacy task property");
+    assert_success(&output);
+    let updated = fs::read_to_string(&note).expect("read updated note");
+    assert!(updated.contains(&legacy_line), "{updated}");
+    assert_eq!(
+        updated
+            .lines()
+            .filter(|line| {
+                line.starts_with("- [")
+                    && line.contains("#task Legacy follow-up")
+            })
+            .count(),
+        0,
+        "{updated}"
+    );
+    assert_eq!(
+        updated
+            .lines()
+            .filter(|line| {
+                line.starts_with("- [")
+                    && line.contains("#task Edited legacy follow-up")
+            })
+            .count(),
+        1,
+        "{updated}"
+    );
+}
+
+#[test]
 fn highlights_ref_sync_routes_annotation_tasks_to_existing_root_note() {
     let temp = TempDir::new("bob-cli-highlights-ref-routed-task");
     let vault = temp.path().join("vault");
@@ -4343,6 +4476,13 @@ Note: marker note mirrored from the PDF
             .any(|line| line.starts_with("- [ ] #task Follow up with Alice")),
         "routed task should not be inserted into the reference note:\n{ref_contents}"
     );
+    assert!(
+        ref_contents.lines().any(|line| {
+            line.starts_with("> [comment] #task Follow up with Alice @alice")
+                && line.contains(" ^ht-")
+        }),
+        "source task anchor should render in the reference note:\n{ref_contents}"
+    );
     let mut route_contents =
         fs::read_to_string(&route_note).expect("read routed note");
     let routed_line = route_contents
@@ -4352,14 +4492,14 @@ Note: marker note mirrored from the PDF
         .to_string();
     assert!(!routed_line.contains("@alice"), "{routed_line}");
     assert!(
-        routed_line.contains("[[ref/books/task-notes#^h-")
+        routed_line.contains("[[ref/books/task-notes#^ht-")
             && routed_line.contains("|🔖]]"),
-        "routed task should link back to the ref note block:\n{routed_line}"
+        "routed task should link back to the source-task ref note block:\n{routed_line}"
     );
     assert!(
-        routed_line.contains("[highlight_task:: ")
+        !routed_line.contains("[highlight_task:: ")
             && routed_line.contains(&format!("[created::{created}]")),
-        "routed task should carry processed marker and created date:\n{routed_line}"
+        "routed task should omit legacy processed marker and carry created date:\n{routed_line}"
     );
 
     let completed_line = format!(
@@ -4391,7 +4531,9 @@ Note: marker note mirrored from the PDF
     );
 
     write_file(&route_note, "---\nparent: \"[[people]]\"\n---\n\n# Alice\n");
-    write_file(&done_note, &format!("{completed_line}\n"));
+    let edited_archived_line = completed_line
+        .replace("#task Follow up with Alice", "#task Followed up with Alice");
+    write_file(&done_note, &format!("{edited_archived_line}\n"));
     assert_success(
         &bob_command()
             .arg("highlights")
@@ -4404,7 +4546,7 @@ Note: marker note mirrored from the PDF
     route_contents = fs::read_to_string(&route_note).expect("read route note");
     assert!(
         !route_contents.contains("#task Follow up with Alice"),
-        "archived routed task should not be recreated:\n{route_contents}"
+        "archived routed task with edited prose should not be recreated:\n{route_contents}"
     );
 }
 
@@ -6552,6 +6694,22 @@ fn highlight_block_ids(contents: &str) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+fn legacy_highlight_task_id(
+    ref_note_path: &str,
+    source_block_id: &str,
+    identity: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update("v1");
+    hasher.update([0]);
+    hasher.update(ref_note_path);
+    hasher.update([0]);
+    hasher.update(source_block_id);
+    hasher.update([0]);
+    hasher.update(identity);
+    hex::encode(hasher.finalize())
 }
 
 fn write_highlights_pdf(path: &Path, marker_contents: &str) {

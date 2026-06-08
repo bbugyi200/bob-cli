@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-08 07:55:03
-status: wip
+status: done
 prompt: sdd/prompts/202606/no_highlight_task_property.md
 ---
 # Plan: Remove New highlight_task Task Properties Without Losing Processed Tracking
