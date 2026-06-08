@@ -405,40 +405,59 @@ work. A writing scan keeps the default note-only refusal unless `--write-pdfs`
 is supplied.
 
 Highlight comments and standalone non-marker notes can also create actionable
-Obsidian tasks. Any unordered Markdown bullet line whose item text contains
-`#task` as a whitespace-delimited token is copied to a top-level unchecked task
-immediately under the generated PDF `^task` line:
+Obsidian tasks, but only when the resolved PDF status is `wip`. Any unordered
+Markdown bullet line whose item text contains `#task` as a
+whitespace-delimited token is copied to an unchecked task:
 
 ```md
 - #task Compare this claim with the appendix.
 - [x] #task Email the citation to Alex.
+- #task Send the quote to Alice @alice
 ```
 
-becomes:
+By default, created tasks are top-level siblings immediately under the
+generated PDF `^task` line:
 
 ```md
-- [ ] #task Compare this claim with the appendix. [[#^h-2b91f0a4c7de|🔖]] [created::2026-06-07]
-- [ ] #task Email the citation to Alex. [[#^h-2b91f0a4c7de|🔖]] [created::2026-06-07]
+- [ ] #task Compare this claim with the appendix. [[#^h-2b91f0a4c7de|🔖]] [highlight_task:: 5c7a...] [created::2026-06-07]
+- [ ] #task Email the citation to Alex. [[#^h-2b91f0a4c7de|🔖]] [highlight_task:: a28f...] [created::2026-06-07]
 ```
 
-Each created task carries a same-file block backlink to the highlight comment
-or standalone note that spawned it, rendered as an aliased `🔖` link between the
-task prose and the `[created::]` field. The target is the `^h-...` block ID of
-that annotation in the managed Highlights region, so clicking 🔖 in Obsidian
-jumps straight to the source passage in the same note. The bare same-file form
-(`[[#^h-...]]`, no note basename) is rename-safe, and multiple `#task` bullets
-in one comment all link to that comment's single block. The link is ignored for
-duplicate detection — identity is computed from the normalized task text with
-the block link and task properties stripped — so adding it never recreates or
-mutates an already-created task.
+If the final whitespace-delimited token is a strict `@name` route suffix, the
+suffix is removed from the created task text and the task is appended to
+existing root-level note `~/bob/name.md` instead. Route names must match
+`@([A-Za-z0-9][A-Za-z0-9_-]*)`; tokens with punctuation, dots, slashes, empty
+names, or path traversal content are ordinary task text. Routed target notes
+must already exist and must not be directories, because new root notes need
+explicit frontmatter that this command cannot infer. For example, `@alice`
+creates this line in `~/bob/alice.md`:
 
-These annotation-created tasks are sibling top-level tasks, not subtasks of the
-PDF reading-status task. They are created once by normalized task text; later
-syncs preserve existing checkbox state and task properties such as
-`[completion::]`, `[cancelled::]`, `[due::]`, or edited priority fields.
-Completing or cancelling these annotation-created tasks does not update the PDF
-marker or reference-note reading status. Tasks created before block backlinks
-were added stay link-less and are left as-is; only new bullets get linked tasks.
+```md
+- [ ] #task Send the quote to Alice [[ref/books/example#^h-2b91f0a4c7de|🔖]] [highlight_task:: 9b31...] [created::2026-06-07]
+```
+
+Each created task carries a block backlink to the highlight comment or
+standalone note that spawned it, rendered as an aliased `🔖` link between the
+task prose and the processed/created fields. Same-note tasks use the bare
+same-file form (`[[#^h-...]]`, no note basename), which is rename-safe. Routed
+tasks use a full vault-relative note target (`[[ref/books/example#^h-...]]`)
+because the source block lives in the generated reference note. Multiple
+`#task` bullets in one comment all link to that comment's single block.
+
+Created tasks also carry `[highlight_task:: ...]`, a stable processed marker
+computed from the source reference note, source block, and normalized task
+identity. The marker moves with the task when it is completed, cancelled, or
+archived by `bob move-done-tasks`, so later syncs do not recreate it and do not
+write any processed state back into the PDF or sidecar. For older tasks created
+before this field existed, the vault-wide scanner falls back to normalized task
+text identity after stripping source backlinks, route suffixes, and task
+properties.
+
+Annotation-created tasks are independent tasks, not subtasks of the PDF
+reading-status task. Later syncs preserve existing checkbox state and task
+properties such as `[completion::]`, `[cancelled::]`, `[due::]`, or edited
+priority fields. Completing or cancelling these annotation-created tasks does
+not update the PDF marker or reference-note reading status.
 
 Generated blocks use Obsidian block IDs beginning with `^h-`. The MVP ID is a
 deterministic content hash over source PDF path, page label, annotation kind,
@@ -547,8 +566,9 @@ The sync model is deliberately asymmetric:
 - Marker/frontmatter fields are 2-way and can conflict.
 - Highlights, highlight comments, and standalone non-marker notes are PDF or
   sidecar to reference note only.
-- Annotation-created `#task` bullets are created in the reference note only and
-  do not sync completion state back to the PDF marker.
+- Annotation-created `#task` bullets are created in the reference note or an
+  explicitly routed existing root note only, and do not sync completion state
+  back to the PDF marker.
 - Edits inside the managed `<!-- highlights:begin -->` region in Obsidian may be
   overwritten.
 

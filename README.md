@@ -172,11 +172,18 @@ highlight comments, and standalone non-marker notes render into the managed
 manual body content outside that region is preserved, and disappeared generated
 blocks are kept as tombstones under `### Removed highlights`. Markdown bullet
 lines tagged with `#task` inside highlight comments or standalone non-marker
-notes also create top-level Obsidian tasks immediately under the generated PDF
-`^task` line, with a `[created::YYYY-MM-DD]` property and a same-file `🔖` block
-backlink (`[[#^h-...|🔖]]`) to the source highlight/note. The link is ignored
-for duplicate detection, so re-syncing never recreates or mutates an existing
-task.
+notes also create Obsidian tasks, but only when the resolved PDF status is
+`wip`. By default, tasks are inserted immediately under the generated PDF
+`^task` line. If the final whitespace-delimited task token is a strict `@name`
+route suffix (`A-Z`, `a-z`, `0-9`, `_`, and `-`, starting with an
+alphanumeric), the suffix is stripped and the task is appended to existing
+`~/bob/name.md` instead; routed target notes are never auto-created. Created
+tasks carry `[created::YYYY-MM-DD]`, `[highlight_task:: ...]`, and a `🔖` block
+backlink to the source highlight/note. Same-note backlinks use
+`[[#^h-...|🔖]]`; routed backlinks use a vault-relative target such as
+`[[ref/books/foo#^h-...|🔖]]`. The processed marker moves with completed,
+cancelled, or `bob move-done-tasks` archived tasks, so re-syncing does not
+recreate them without PDF or sidecar edits.
 
 The full contract and MacBook setup guide live in
 [`docs/highlights-ref-sync.md`](docs/highlights-ref-sync.md).

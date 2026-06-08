@@ -4296,6 +4296,288 @@ Note:
 }
 
 #[test]
+fn highlights_ref_sync_routes_annotation_tasks_to_existing_root_note() {
+    let temp = TempDir::new("bob-cli-highlights-ref-routed-task");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/task-notes.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/task-notes.md");
+    let route_note = vault.join("alice.md");
+    let done_note = vault.join("done/alice_done.md");
+    let created = Local::now().format("%Y-%m-%d").to_string();
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Task Notes\n",
+    );
+    write_file(&route_note, "---\nparent: \"[[people]]\"\n---\n\n# Alice\n");
+    write_file(
+        &sidecar,
+        "\
+# Task Notes
+
+## Page 4
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Routed claim.
+
+- #task Follow up with Alice @alice
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync routed sidecar task");
+
+    assert_success(&output);
+    let ref_contents = fs::read_to_string(&note).expect("read ref note");
+    assert!(
+        !ref_contents
+            .lines()
+            .any(|line| line.starts_with("- [ ] #task Follow up with Alice")),
+        "routed task should not be inserted into the reference note:\n{ref_contents}"
+    );
+    let mut route_contents =
+        fs::read_to_string(&route_note).expect("read routed note");
+    let routed_line = route_contents
+        .lines()
+        .find(|line| line.starts_with("- [ ] #task Follow up with Alice"))
+        .unwrap_or_else(|| panic!("missing routed task:\n{route_contents}"))
+        .to_string();
+    assert!(!routed_line.contains("@alice"), "{routed_line}");
+    assert!(
+        routed_line.contains("[[ref/books/task-notes#^h-")
+            && routed_line.contains("|🔖]]"),
+        "routed task should link back to the ref note block:\n{routed_line}"
+    );
+    assert!(
+        routed_line.contains("[highlight_task:: ")
+            && routed_line.contains(&format!("[created::{created}]")),
+        "routed task should carry processed marker and created date:\n{routed_line}"
+    );
+
+    let completed_line = format!(
+        "{} [completion::2026-06-08]",
+        routed_line.replacen("- [ ]", "- [x]", 1)
+    );
+    write_file(
+        &route_note,
+        &route_contents.replace(&routed_line, &completed_line),
+    );
+    assert_success(
+        &bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("resync completed routed task"),
+    );
+    route_contents =
+        fs::read_to_string(&route_note).expect("read rerouted note");
+    assert_eq!(
+        route_contents
+            .lines()
+            .filter(|line| line.contains("#task Follow up with Alice"))
+            .count(),
+        1,
+        "{route_contents}"
+    );
+
+    write_file(&route_note, "---\nparent: \"[[people]]\"\n---\n\n# Alice\n");
+    write_file(&done_note, &format!("{completed_line}\n"));
+    assert_success(
+        &bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("resync archived routed task"),
+    );
+    route_contents = fs::read_to_string(&route_note).expect("read route note");
+    assert!(
+        !route_contents.contains("#task Follow up with Alice"),
+        "archived routed task should not be recreated:\n{route_contents}"
+    );
+}
+
+#[test]
+fn highlights_ref_sync_skips_annotation_tasks_for_non_wip_statuses() {
+    for status in ["unread", "read", "abandoned"] {
+        let temp = TempDir::new(&format!(
+            "bob-cli-highlights-ref-non-wip-task-{status}"
+        ));
+        let vault = temp.path().join("vault");
+        let pdf = vault.join("lib/books/task-notes.pdf");
+        let sidecar = pdf.with_extension("md");
+        let note = vault.join("ref/books/task-notes.md");
+        write_highlights_pdf(
+            &pdf,
+            &format!(
+                "- status: {status}\n- parent: obsidian\n- title: Task Notes\n"
+            ),
+        );
+        write_file(
+            &sidecar,
+            "\
+## Page 4
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Claim.
+
+- #task Should not be created.
+",
+        );
+
+        let output = bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .unwrap_or_else(|error| panic!("sync {status}: {error}"));
+
+        assert_success(&output);
+        let contents = fs::read_to_string(&note)
+            .unwrap_or_else(|error| panic!("read note for {status}: {error}"));
+        assert!(
+            !contents
+                .lines()
+                .any(|line| line
+                    .starts_with("- [ ] #task Should not be created.")),
+            "{status} PDFs should not create annotation tasks:\n{contents}"
+        );
+    }
+}
+
+#[test]
+fn highlights_ref_scan_groups_routed_tasks_with_parallel_jobs() {
+    let temp = TempDir::new("bob-cli-highlights-ref-routed-scan");
+    let vault = temp.path().join("vault");
+    let route_note = vault.join("alice.md");
+    write_file(&route_note, "---\nparent: \"[[people]]\"\n---\n\n# Alice\n");
+    for (name, title, task) in [
+        ("alpha", "Alpha", "Ask Alice about alpha."),
+        ("beta", "Beta", "Ask Alice about beta."),
+    ] {
+        let pdf = vault.join(format!("lib/books/{name}.pdf"));
+        write_highlights_pdf(
+            &pdf,
+            &format!("- status: wip\n- parent: obsidian\n- title: {title}\n"),
+        );
+        write_file(
+            &pdf.with_extension("md"),
+            &format!(
+                "\
+## Page 1
+
+Note: marker note mirrored from the PDF
+
+---
+
+> {title} claim.
+
+- #task {task} @alice
+"
+            ),
+        );
+    }
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("scan")
+        .arg("--jobs")
+        .arg("2")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("parallel routed scan");
+
+    assert_success(&output);
+    let contents = fs::read_to_string(&route_note).expect("read route note");
+    assert_eq!(
+        contents.matches("#task Ask Alice about alpha.").count(),
+        1,
+        "{contents}"
+    );
+    assert_eq!(
+        contents.matches("#task Ask Alice about beta.").count(),
+        1,
+        "{contents}"
+    );
+    assert_text_order(
+        &contents,
+        &[
+            "#task Ask Alice about alpha.",
+            "#task Ask Alice about beta.",
+        ],
+    );
+}
+
+#[test]
+fn highlights_ref_sync_missing_routed_target_fails_before_writes() {
+    let temp = TempDir::new("bob-cli-highlights-ref-missing-route");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/task-notes.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/task-notes.md");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Task Notes\n",
+    );
+    write_file(
+        &sidecar,
+        "\
+## Page 4
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Routed claim.
+
+- #task Follow up with Alice @alice
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync missing routed task target");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "missing routed target should fail:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output)
+            .contains("routed annotation task target does not exist")
+            && stderr(&output).contains("alice.md")
+            && stderr(&output).contains("create a root-level note"),
+        "expected missing route target error:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !note.exists(),
+        "failed routed planning should not write the reference note"
+    );
+}
+
+#[test]
 fn highlights_ref_comment_edit_keeps_stable_block_id() {
     let temp = TempDir::new("bob-cli-highlights-ref-comment-edit");
     let vault = temp.path().join("vault");

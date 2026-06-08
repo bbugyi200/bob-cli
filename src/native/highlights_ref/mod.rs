@@ -56,6 +56,8 @@ const MANAGED_BODY_END: &str = "<!-- highlights:end -->";
 const PDF_TASK_BLOCK_ID: &str = "^task";
 const PDF_TASK_PRIORITY: &str = "[p::2]";
 const PDF_TASK_TAG: &str = "#task";
+const HIGHLIGHT_TASK_FIELD: &str = "highlight_task";
+const HIGHLIGHT_TASK_ID_VERSION: &str = "v1";
 const PIPELINE_VERSION: &str = "highlights-ref-mvp-3";
 const REMOVED_HIGHLIGHTS_HEADING: &str = "### Removed highlights";
 const SOURCE_LINK_ALIAS: &str = "🔖";
@@ -354,6 +356,29 @@ struct AnnotationTaskCandidate {
     identity: String,
     task_text: String,
     source_block_id: String,
+    target: AnnotationTaskTarget,
+    source_ref_note_path: PathBuf,
+    processed_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnnotationTaskTarget {
+    ReferenceNote,
+    RoutedNote(PathBuf),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProcessedTaskIndex {
+    processed_ids: BTreeSet<String>,
+    legacy_identities: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoutedTaskNoteWrite {
+    path: PathBuf,
+    original_contents: String,
+    rendered_contents: String,
+    action: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -371,9 +396,14 @@ struct PdfSyncPlan {
     note: ParsedNote,
     sidecar: Option<SidecarInput>,
     rendered_highlights: Option<RenderedHighlights>,
+    stable_metadata: PipelineMetadata,
     rendered_body: String,
     stable_rendered_note: String,
     stable_note_action: &'static str,
+    annotation_task_candidates: Vec<AnnotationTaskCandidate>,
+    annotation_tasks_created: usize,
+    annotation_tasks_skipped: usize,
+    routed_task_note_writes: Vec<RoutedTaskNoteWrite>,
     pdf_task_signal: PdfTaskStatusSignal,
     status_normalization: StatusNormalization,
 }
@@ -382,6 +412,9 @@ struct PdfSyncPlan {
 struct SyncWriteReport {
     note_action: &'static str,
     marker_action: &'static str,
+    routed_note_actions: usize,
+    annotation_tasks_created: usize,
+    annotation_tasks_skipped: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +549,8 @@ fn report_result(result: Result<()>) -> i32 {
 }
 
 fn sync_pdf(config: &Config, pdf: &Path, options: SyncOptions) -> Result<()> {
-    let plan = plan_pdf_sync(config, pdf, options)?;
+    let mut plan = plan_pdf_sync(config, pdf, options)?;
+    finalize_annotation_task_plans(config, &mut [&mut plan])?;
     print_pdf_sync_report("sync", config, &plan, options);
 
     if options.dry_run {
@@ -551,7 +585,7 @@ fn scan_library(
     // `&Config` and one PDF path, so planning is embarrassingly parallel. We
     // collect into a position-keyed vector and reassemble in `pdfs` order so
     // reporting output stays deterministic regardless of completion order.
-    let plan_outcomes = pdfs
+    let mut plan_outcomes = pdfs
         .iter()
         .zip(plan_pdfs(config, &pdfs, options, jobs))
         .map(|(pdf, result)| match result {
@@ -562,6 +596,14 @@ fn scan_library(
             }),
         })
         .collect::<Vec<_>>();
+    let mut plans_to_finalize = plan_outcomes
+        .iter_mut()
+        .filter_map(|outcome| match outcome {
+            ScanPlanOutcome::Planned(plan) => Some(plan.as_mut()),
+            ScanPlanOutcome::Failed(_) => None,
+        })
+        .collect::<Vec<_>>();
+    finalize_annotation_task_plans(config, &mut plans_to_finalize)?;
     let plans = plan_outcomes
         .iter()
         .filter_map(|outcome| match outcome {
@@ -782,13 +824,17 @@ fn plan_pdf_sync(
         &stable_metadata.source_pdf,
         rendered_highlights.as_ref(),
     )?;
-    let annotation_tasks =
-        annotation_task_candidates(config, pdf, sidecar.as_ref());
-    let rendered_body = insert_missing_annotation_tasks(
-        &rendered_body,
-        &annotation_tasks,
-        &current_local_date(),
-    )?;
+    let annotation_task_candidates =
+        if projection_status_is(&synced_projection, STATUS_WIP) {
+            annotation_task_candidates(
+                config,
+                &note_path,
+                pdf,
+                sidecar.as_ref(),
+            )?
+        } else {
+            Vec::new()
+        };
     let stable_rendered_note = note.render_with_projection(
         &synced_projection,
         &synced_hash,
@@ -815,12 +861,130 @@ fn plan_pdf_sync(
         note,
         sidecar,
         rendered_highlights,
+        stable_metadata,
         rendered_body,
         stable_rendered_note,
         stable_note_action,
+        annotation_task_candidates,
+        annotation_tasks_created: 0,
+        annotation_tasks_skipped: 0,
+        routed_task_note_writes: Vec::new(),
         pdf_task_signal,
         status_normalization,
     })
+}
+
+fn finalize_annotation_task_plans(
+    config: &Config,
+    plans: &mut [&mut PdfSyncPlan],
+) -> Result<()> {
+    let mut processed = processed_task_index(config)?;
+    let created_date = current_local_date();
+    let mut routed_groups: BTreeMap<PathBuf, RoutedTaskGroup> = BTreeMap::new();
+
+    for (plan_index, plan) in plans.iter_mut().enumerate() {
+        let plan = &mut **plan;
+        plan.annotation_tasks_created = 0;
+        plan.annotation_tasks_skipped = 0;
+        plan.routed_task_note_writes.clear();
+
+        let mut reference_task_lines = Vec::new();
+        for candidate in plan.annotation_task_candidates.clone() {
+            if !processed.accept(&candidate) {
+                plan.annotation_tasks_skipped += 1;
+                continue;
+            }
+
+            let task_line =
+                render_annotation_task_line(config, &candidate, &created_date);
+            plan.annotation_tasks_created += 1;
+            match &candidate.target {
+                AnnotationTaskTarget::ReferenceNote => {
+                    reference_task_lines.push(task_line);
+                }
+                AnnotationTaskTarget::RoutedNote(path) => {
+                    let group = routed_groups
+                        .entry(path.clone())
+                        .or_insert_with(|| RoutedTaskGroup {
+                            owner_plan_index: plan_index,
+                            lines: Vec::new(),
+                        });
+                    group.lines.push(task_line);
+                }
+            }
+        }
+
+        if !reference_task_lines.is_empty() {
+            plan.rendered_body = insert_annotation_task_lines_after_pdf_task(
+                &plan.rendered_body,
+                &reference_task_lines,
+            )?;
+            refresh_stable_rendered_note(plan);
+        }
+    }
+
+    for (path, group) in routed_groups {
+        if group.lines.is_empty() {
+            continue;
+        }
+        let original_contents = fs::read_to_string(&path).map_err(|error| {
+            CommandError::new(format!(
+                "read routed task note {}: {error}",
+                path.display()
+            ))
+        })?;
+        let rendered_contents =
+            append_task_lines(&original_contents, &group.lines);
+        let action =
+            change_action(true, Some(&original_contents), &rendered_contents);
+        if action == "none" {
+            continue;
+        }
+        plans[group.owner_plan_index].routed_task_note_writes.push(
+            RoutedTaskNoteWrite {
+                path,
+                original_contents,
+                rendered_contents,
+                action,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RoutedTaskGroup {
+    owner_plan_index: usize,
+    lines: Vec<String>,
+}
+
+impl ProcessedTaskIndex {
+    fn accept(&mut self, candidate: &AnnotationTaskCandidate) -> bool {
+        if self.processed_ids.contains(&candidate.processed_id)
+            || self.legacy_identities.contains(&candidate.identity)
+        {
+            return false;
+        }
+
+        self.processed_ids.insert(candidate.processed_id.clone());
+        self.legacy_identities.insert(candidate.identity.clone());
+        true
+    }
+}
+
+fn refresh_stable_rendered_note(plan: &mut PdfSyncPlan) {
+    plan.stable_rendered_note = plan.note.render_with_projection(
+        &plan.synced_projection,
+        &plan.synced_hash,
+        &plan.stable_metadata,
+        &plan.rendered_body,
+    );
+    plan.stable_note_action = change_action(
+        plan.note.exists(),
+        plan.note.contents().as_deref(),
+        &plan.stable_rendered_note,
+    );
 }
 
 fn execute_pdf_sync(
@@ -829,6 +993,11 @@ fn execute_pdf_sync(
 ) -> Result<SyncWriteReport> {
     if note_write_planned(plan) {
         ensure_note_unchanged_for_write(plan)?;
+    }
+    for write in &plan.routed_task_note_writes {
+        if write.action != "none" {
+            ensure_routed_note_unchanged_for_write(write)?;
+        }
     }
     if plan.marker_write_needed {
         ensure_pdf_unchanged_for_write(plan)?;
@@ -879,6 +1048,15 @@ fn execute_pdf_sync(
         ensure_note_unchanged_for_write(plan)?;
         atomic_write(&plan.note_path, &rendered_note)?;
     }
+    let mut routed_note_actions = 0usize;
+    for write in &plan.routed_task_note_writes {
+        if write.action == "none" {
+            continue;
+        }
+        ensure_routed_note_unchanged_for_write(write)?;
+        atomic_write(&write.path, &write.rendered_contents)?;
+        routed_note_actions += 1;
+    }
 
     Ok(SyncWriteReport {
         note_action,
@@ -887,6 +1065,9 @@ fn execute_pdf_sync(
         } else {
             "none"
         },
+        routed_note_actions,
+        annotation_tasks_created: plan.annotation_tasks_created,
+        annotation_tasks_skipped: plan.annotation_tasks_skipped,
     })
 }
 
@@ -900,6 +1081,19 @@ fn ensure_note_unchanged_for_write(plan: &PdfSyncPlan) -> Result<()> {
         Err(CommandError::new(format!(
             "reference note changed during sync; rerun: {}",
             plan.note_path.display()
+        )))
+    }
+}
+
+fn ensure_routed_note_unchanged_for_write(
+    write: &RoutedTaskNoteWrite,
+) -> Result<()> {
+    if note_contents_match_plan(&write.path, Some(&write.original_contents))? {
+        Ok(())
+    } else {
+        Err(CommandError::new(format!(
+            "routed task note changed during sync; rerun: {}",
+            write.path.display()
         )))
     }
 }
@@ -981,21 +1175,45 @@ fn print_pdf_sync_report(
     if let Some(count) = plan.rendered_highlights_count {
         println!("highlights_count: {count}");
     }
+    println!("annotation_tasks_create: {}", plan.annotation_tasks_created);
+    println!("annotation_tasks_skip: {}", plan.annotation_tasks_skipped);
+    println!(
+        "routed_task_note_writes: {}",
+        planned_routed_note_write_count(plan)
+    );
 }
 
 fn print_sync_write_report(report: SyncWriteReport) {
     println!("note_action: {}", report.note_action);
     println!("pdf_marker_action: {}", report.marker_action);
+    println!(
+        "annotation_tasks_created: {}",
+        report.annotation_tasks_created
+    );
+    println!(
+        "annotation_tasks_skipped: {}",
+        report.annotation_tasks_skipped
+    );
+    println!("routed_task_note_writes: {}", report.routed_note_actions);
     println!("writes: {}", write_summary(report));
 }
 
 fn write_summary(report: SyncWriteReport) -> &'static str {
-    match (report.note_action, report.marker_action != "none") {
-        ("none", false) => "none",
-        ("none", true) => "pdf",
-        (_, false) => "note",
-        (_, true) => "note,pdf",
+    let note_writes =
+        report.note_action != "none" || report.routed_note_actions > 0;
+    match (note_writes, report.marker_action != "none") {
+        (false, false) => "none",
+        (false, true) => "pdf",
+        (true, false) => "note",
+        (true, true) => "note,pdf",
     }
+}
+
+fn planned_routed_note_write_count(plan: &PdfSyncPlan) -> usize {
+    plan.routed_task_note_writes
+        .iter()
+        .filter(|write| write.action != "none")
+        .count()
 }
 
 fn status_normalization_label(
@@ -1052,6 +1270,15 @@ fn print_scan_plan_entry(plan: &PdfSyncPlan) {
     if let Some(count) = plan.rendered_highlights_count {
         println!("  highlights_count: {count}");
     }
+    println!(
+        "  annotation_tasks_create: {}",
+        plan.annotation_tasks_created
+    );
+    println!("  annotation_tasks_skip: {}", plan.annotation_tasks_skipped);
+    println!(
+        "  routed_task_note_writes: {}",
+        planned_routed_note_write_count(plan)
+    );
 }
 
 fn print_scan_plan_failure_entry(failure: &ScanFailure) {
@@ -1071,18 +1298,36 @@ fn print_scan_plan_summary(plans: &[&PdfSyncPlan], plan_failure_count: usize) {
         .count();
     let updates = plans
         .iter()
-        .filter(|plan| plan.stable_note_action == "update")
-        .count();
+        .map(|plan| {
+            usize::from(plan.stable_note_action == "update")
+                + planned_routed_note_write_count(plan)
+        })
+        .sum::<usize>();
     let unchanged = plans
         .iter()
         .filter(|plan| plan.stable_note_action == "none")
         .count();
     let marker_updates =
         plans.iter().filter(|plan| plan.marker_write_needed).count();
+    let annotation_tasks_created = plans
+        .iter()
+        .map(|plan| plan.annotation_tasks_created)
+        .sum::<usize>();
+    let annotation_tasks_skipped = plans
+        .iter()
+        .map(|plan| plan.annotation_tasks_skipped)
+        .sum::<usize>();
+    let routed_task_note_writes = plans
+        .iter()
+        .map(|plan| planned_routed_note_write_count(plan))
+        .sum::<usize>();
     println!("summary:");
     println!("  notes_create: {creates}");
     println!("  notes_update: {updates}");
     println!("  notes_unchanged: {unchanged}");
+    println!("  annotation_tasks_create: {annotation_tasks_created}");
+    println!("  annotation_tasks_skip: {annotation_tasks_skipped}");
+    println!("  routed_task_note_writes: {routed_task_note_writes}");
     println!("  pdf_markers_would_update: {marker_updates}");
     println!("  pdfs_planned: {}", plans.len());
     println!("  plan_failures: {plan_failure_count}");
@@ -1103,8 +1348,11 @@ fn print_scan_write_summary(
         .count();
     let updates = reports
         .iter()
-        .filter(|report| report.note_action == "update")
-        .count();
+        .map(|report| {
+            usize::from(report.note_action == "update")
+                + report.routed_note_actions
+        })
+        .sum::<usize>();
     let unchanged = reports
         .iter()
         .filter(|report| report.note_action == "none")
@@ -1113,10 +1361,25 @@ fn print_scan_write_summary(
         .iter()
         .filter(|report| report.marker_action != "none")
         .count();
+    let annotation_tasks_created = reports
+        .iter()
+        .map(|report| report.annotation_tasks_created)
+        .sum::<usize>();
+    let annotation_tasks_skipped = reports
+        .iter()
+        .map(|report| report.annotation_tasks_skipped)
+        .sum::<usize>();
+    let routed_task_note_writes = reports
+        .iter()
+        .map(|report| report.routed_note_actions)
+        .sum::<usize>();
     println!("summary:");
     println!("  notes_created: {creates}");
     println!("  notes_updated: {updates}");
     println!("  notes_unchanged: {unchanged}");
+    println!("  annotation_tasks_created: {annotation_tasks_created}");
+    println!("  annotation_tasks_skipped: {annotation_tasks_skipped}");
+    println!("  routed_task_note_writes: {routed_task_note_writes}");
     println!("  pdf_markers_updated: {marker_updates}");
     println!("  write_successes: {}", reports.len());
     println!("  plan_failures: {plan_failure_count}");
@@ -1128,7 +1391,9 @@ fn print_scan_write_summary(
     if plan_failure_count + write_failure_count > 0 {
         println!("result: partial-failure");
     }
-    let note_writes = reports.iter().any(|report| report.note_action != "none");
+    let note_writes = reports.iter().any(|report| {
+        report.note_action != "none" || report.routed_note_actions > 0
+    });
     let marker_writes =
         reports.iter().any(|report| report.marker_action != "none");
     println!(
@@ -1440,6 +1705,11 @@ where
     for plan in &plans {
         if note_write_planned(plan) {
             touched_paths.insert(plan.note_path.clone());
+        }
+        for write in &plan.routed_task_note_writes {
+            if write.action != "none" {
+                touched_paths.insert(write.path.clone());
+            }
         }
         if plan.marker_write_needed {
             touched_paths.insert(plan.pdf.clone());
@@ -2327,11 +2597,12 @@ fn normalized_identity_text(text: &str) -> String {
 
 fn annotation_task_candidates(
     config: &Config,
+    ref_note_path: &Path,
     pdf: &Path,
     sidecar: Option<&SidecarInput>,
-) -> Vec<AnnotationTaskCandidate> {
+) -> Result<Vec<AnnotationTaskCandidate>> {
     let Some(sidecar) = sidecar else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut skipped_marker_note = false;
@@ -2349,50 +2620,205 @@ fn annotation_task_candidates(
                 };
                 let block_id = annotation_block_id(config, pdf, annotation);
                 candidates.extend(annotation_task_candidates_from_text(
-                    source, &block_id,
-                ));
+                    config,
+                    ref_note_path,
+                    source,
+                    &block_id,
+                )?);
             }
             SidecarAnnotationKind::StandaloneNote => {
                 let block_id = annotation_block_id(config, pdf, annotation);
                 candidates.extend(annotation_task_candidates_from_text(
+                    config,
+                    ref_note_path,
                     &annotation.text,
                     &block_id,
-                ));
+                )?);
             }
         }
     }
-    candidates
+    Ok(candidates)
 }
 
 fn annotation_task_candidates_from_text(
+    config: &Config,
+    ref_note_path: &Path,
     text: &str,
     source_block_id: &str,
-) -> Vec<AnnotationTaskCandidate> {
-    text.lines()
-        .filter_map(|line| {
-            annotation_task_candidate_from_source_line(line, source_block_id)
-        })
-        .collect()
+) -> Result<Vec<AnnotationTaskCandidate>> {
+    let mut candidates = Vec::new();
+    for line in text.lines() {
+        if let Some(candidate) = annotation_task_candidate_from_source_line(
+            config,
+            ref_note_path,
+            line,
+            source_block_id,
+        )? {
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
 }
 
 fn annotation_task_candidate_from_source_line(
+    config: &Config,
+    ref_note_path: &Path,
     line: &str,
     source_block_id: &str,
-) -> Option<AnnotationTaskCandidate> {
-    let item = strip_unordered_list_marker(line)?;
+) -> Result<Option<AnnotationTaskCandidate>> {
+    let Some(item) = strip_unordered_list_marker(line) else {
+        return Ok(None);
+    };
     let task_body = strip_optional_markdown_task_checkbox(item);
-    let task_text = normalized_identity_text(&strip_created_task_properties(
-        task_body.trim(),
-    ));
+    let task_text_with_route = normalized_identity_text(
+        &strip_created_task_properties(task_body.trim()),
+    );
+    let (task_text, route_name) =
+        split_annotation_task_route_suffix(&task_text_with_route);
     if !contains_markdown_token(&task_text, PDF_TASK_TAG) {
-        return None;
+        return Ok(None);
     }
+    let target = match route_name {
+        Some(route_name) => AnnotationTaskTarget::RoutedNote(
+            route_name_to_note_path(config, &route_name)?,
+        ),
+        None => AnnotationTaskTarget::ReferenceNote,
+    };
+    let Some(identity) = annotation_task_identity(&task_text) else {
+        return Ok(None);
+    };
+    let processed_id = annotation_task_processed_id(
+        config,
+        ref_note_path,
+        source_block_id,
+        &identity,
+    );
 
-    Some(AnnotationTaskCandidate {
-        identity: annotation_task_identity(&task_text)?,
+    Ok(Some(AnnotationTaskCandidate {
+        identity,
         task_text,
         source_block_id: source_block_id.to_string(),
-    })
+        target,
+        source_ref_note_path: ref_note_path.to_path_buf(),
+        processed_id,
+    }))
+}
+
+fn split_annotation_task_route_suffix(
+    task_text: &str,
+) -> (String, Option<String>) {
+    let trimmed = task_text.trim();
+    let Some((separator_index, separator)) = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+    else {
+        return (trimmed.to_string(), None);
+    };
+    let token_start = separator_index + separator.len_utf8();
+    let before = &trimmed[..separator_index];
+    let token = &trimmed[token_start..];
+    let Some(route_name) = strict_annotation_task_route_name(token) else {
+        return (trimmed.to_string(), None);
+    };
+    (before.trim_end().to_string(), Some(route_name))
+}
+
+fn strict_annotation_task_route_name(token: &str) -> Option<String> {
+    let name = token.strip_prefix('@')?;
+    let mut characters = name.chars();
+    let first = characters.next()?;
+    if !first.is_ascii_alphanumeric() {
+        return None;
+    }
+    characters
+        .all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+        })
+        .then(|| name.to_string())
+}
+
+fn route_name_to_note_path(
+    config: &Config,
+    route_name: &str,
+) -> Result<PathBuf> {
+    let path = config.bob_dir.join(format!("{route_name}.md"));
+    if path.is_dir() {
+        return Err(CommandError::new(format!(
+            "routed annotation task target is a directory: {}; create a root-level note named {route_name}.md first",
+            path.display()
+        )));
+    }
+    if !path.is_file() {
+        return Err(CommandError::new(format!(
+            "routed annotation task target does not exist: {}; create a root-level note named {route_name}.md first",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn annotation_task_processed_id(
+    config: &Config,
+    ref_note_path: &Path,
+    source_block_id: &str,
+    identity: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(HIGHLIGHT_TASK_ID_VERSION);
+    hasher.update([0]);
+    hasher.update(vault_relative_path_value(config, ref_note_path));
+    hasher.update([0]);
+    hasher.update(source_block_id);
+    hasher.update([0]);
+    hasher.update(identity);
+    hex::encode(hasher.finalize())
+}
+
+fn render_annotation_task_line(
+    config: &Config,
+    candidate: &AnnotationTaskCandidate,
+    created_date: &str,
+) -> String {
+    let source_link = annotation_task_source_link(config, candidate);
+    format!(
+        "- [ ] {} {}[{}:: {}] [created::{}]",
+        candidate.task_text,
+        source_link,
+        HIGHLIGHT_TASK_FIELD,
+        candidate.processed_id,
+        created_date
+    )
+}
+
+fn annotation_task_source_link(
+    config: &Config,
+    candidate: &AnnotationTaskCandidate,
+) -> String {
+    if candidate.source_block_id.is_empty() {
+        return String::new();
+    }
+
+    match &candidate.target {
+        AnnotationTaskTarget::ReferenceNote => format!(
+            "[[#^{}|{}]] ",
+            candidate.source_block_id, SOURCE_LINK_ALIAS
+        ),
+        AnnotationTaskTarget::RoutedNote(_) => format!(
+            "[[{}#^{}|{}]] ",
+            vault_relative_note_link(config, &candidate.source_ref_note_path),
+            candidate.source_block_id,
+            SOURCE_LINK_ALIAS
+        ),
+    }
+}
+
+fn vault_relative_note_link(config: &Config, note_path: &Path) -> String {
+    let mut link = vault_relative_path_value(config, note_path);
+    if let Some(stripped) = link.strip_suffix(".md") {
+        link = stripped.to_string();
+    }
+    link
 }
 
 fn strip_optional_markdown_task_checkbox(item: &str) -> &str {
@@ -2414,7 +2840,9 @@ fn strip_markdown_task_checkbox(item: &str) -> Option<&str> {
 fn annotation_task_identity(task_text: &str) -> Option<String> {
     let without_link = strip_source_block_link(task_text);
     let without_properties = strip_obsidian_task_properties(&without_link);
-    let identity = normalized_identity_text(&without_properties);
+    let (without_route, _) =
+        split_annotation_task_route_suffix(&without_properties);
+    let identity = normalized_identity_text(&without_route);
     contains_markdown_token(&identity, PDF_TASK_TAG).then_some(identity)
 }
 
@@ -2448,12 +2876,14 @@ fn strip_source_block_link(text: &str) -> String {
     stripped
 }
 
+#[cfg(test)]
 fn existing_annotation_task_identities(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter_map(existing_annotation_task_identity)
         .collect()
 }
 
+#[cfg(test)]
 fn existing_annotation_task_identity(line: &str) -> Option<String> {
     if line.as_bytes().first().is_some_and(u8::is_ascii_whitespace) {
         return None;
@@ -2465,6 +2895,121 @@ fn existing_annotation_task_identity(line: &str) -> Option<String> {
         return None;
     }
     annotation_task_identity(task_body)
+}
+
+fn processed_task_index(config: &Config) -> Result<ProcessedTaskIndex> {
+    let mut index = ProcessedTaskIndex::default();
+    if !config.bob_dir.is_dir() {
+        return Ok(index);
+    }
+    collect_processed_task_index_from_dir(&config.bob_dir, &mut index)?;
+    Ok(index)
+}
+
+fn collect_processed_task_index_from_dir(
+    directory: &Path,
+    index: &mut ProcessedTaskIndex,
+) -> Result<()> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        CommandError::new(format!("scan {}: {error}", directory.display()))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CommandError::new(format!("scan {}: {error}", directory.display()))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            CommandError::new(format!("stat {}: {error}", path.display()))
+        })?;
+        if file_type.is_dir() {
+            if !is_hidden_path_component(&path) {
+                collect_processed_task_index_from_dir(&path, index)?;
+            }
+        } else if file_type.is_file() && is_markdown_note_path(&path) {
+            collect_processed_task_index_from_file(&path, index)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_processed_task_index_from_file(
+    path: &Path,
+    index: &mut ProcessedTaskIndex,
+) -> Result<()> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        CommandError::new(format!(
+            "read Markdown task index {}: {error}",
+            path.display()
+        ))
+    })?;
+    for line in contents.lines() {
+        let Some(task_body) = markdown_task_body(line) else {
+            continue;
+        };
+        for processed_id in
+            obsidian_task_property_values(task_body, HIGHLIGHT_TASK_FIELD)
+        {
+            index.processed_ids.insert(processed_id);
+        }
+        if let Some(identity) = annotation_task_identity(task_body) {
+            index.legacy_identities.insert(identity);
+        }
+    }
+    Ok(())
+}
+
+fn is_hidden_path_component(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.starts_with('.'))
+}
+
+fn is_markdown_note_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+fn markdown_task_body(line: &str) -> Option<&str> {
+    let item = strip_unordered_list_marker(line)?;
+    strip_markdown_task_checkbox(item)
+}
+
+fn obsidian_task_property_values(text: &str, key: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find('[') {
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find(']') else {
+            break;
+        };
+        let inside = &after_start[..end];
+        if let Some((property_key, value)) = obsidian_task_property(inside)
+            && property_key.eq_ignore_ascii_case(key)
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                values.push(value.to_string());
+            }
+        }
+
+        remaining = &after_start[end + 1..];
+    }
+
+    values
+}
+
+fn obsidian_task_property(inside_brackets: &str) -> Option<(&str, &str)> {
+    let (key, value) = inside_brackets.split_once("::")?;
+    let key = key.trim();
+    (!key.is_empty()
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+        }))
+    .then_some((key, value))
 }
 
 fn strip_created_task_properties(text: &str) -> String {
@@ -2508,13 +3053,7 @@ fn strip_matching_obsidian_task_properties(
 }
 
 fn obsidian_task_property_key(inside_brackets: &str) -> Option<&str> {
-    let (key, _) = inside_brackets.split_once("::")?;
-    let key = key.trim();
-    (!key.is_empty()
-        && key.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-        }))
-    .then_some(key)
+    obsidian_task_property(inside_brackets).map(|(key, _)| key)
 }
 
 fn parse_pdf_task_line(body: &str) -> Result<PdfTaskLineState> {
@@ -3696,6 +4235,7 @@ fn rewrite_pdf_task_checkbox_for_projection(
     replace_pdf_task_checkbox_mark(body, projection_pdf_task_mark(projection))
 }
 
+#[cfg(test)]
 fn insert_missing_annotation_tasks(
     body: &str,
     candidates: &[AnnotationTaskCandidate],
@@ -3726,8 +4266,12 @@ fn insert_missing_annotation_tasks(
                 )
             };
             missing.push(format!(
-                "- [ ] {} {}[created::{}]",
-                candidate.task_text, source_link, created_date
+                "- [ ] {} {}[{}:: {}] [created::{}]",
+                candidate.task_text,
+                source_link,
+                HIGHLIGHT_TASK_FIELD,
+                candidate.processed_id,
+                created_date
             ));
         }
     }
@@ -3737,6 +4281,63 @@ fn insert_missing_annotation_tasks(
     }
 
     Ok(insert_lines_after(body, task_line.line_index, &missing))
+}
+
+fn insert_annotation_task_lines_after_pdf_task(
+    body: &str,
+    lines: &[String],
+) -> Result<String> {
+    if lines.is_empty() {
+        return Ok(body.to_string());
+    }
+
+    let task_line = match parse_pdf_task_line(body)? {
+        PdfTaskLineState::Present(task_line) => task_line,
+        PdfTaskLineState::Missing => {
+            return Err(CommandError::new(
+                "reference note is missing the generated PDF task line with ^task; cannot create annotation tasks",
+            ));
+        }
+    };
+    Ok(insert_lines_after(body, task_line.line_index, lines))
+}
+
+fn append_task_lines(contents: &str, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return contents.to_string();
+    }
+
+    let line_ending = preferred_line_ending(contents);
+    let mut rendered = String::with_capacity(
+        contents.len()
+            + lines
+                .iter()
+                .map(|line| line.len() + line_ending.len())
+                .sum::<usize>()
+            + line_ending.len(),
+    );
+    rendered.push_str(contents);
+    if !rendered.is_empty() && !rendered.ends_with('\n') {
+        rendered.push_str(line_ending);
+    }
+    for line in lines {
+        rendered.push_str(line);
+        rendered.push_str(line_ending);
+    }
+    rendered
+}
+
+fn preferred_line_ending(contents: &str) -> &'static str {
+    contents
+        .find('\n')
+        .map(|index| {
+            if index > 0 && contents.as_bytes().get(index - 1) == Some(&b'\r') {
+                "\r\n"
+            } else {
+                "\n"
+            }
+        })
+        .unwrap_or("\n")
 }
 
 fn insert_lines_after(
@@ -4706,8 +5307,12 @@ fn ref_type_from_relative_pdf_path(
 }
 
 fn source_pdf_value(config: &Config, pdf: &Path) -> String {
-    pdf.strip_prefix(&config.bob_dir)
-        .unwrap_or(pdf)
+    vault_relative_path_value(config, pdf)
+}
+
+fn vault_relative_path_value(config: &Config, path: &Path) -> String {
+    path.strip_prefix(&config.bob_dir)
+        .unwrap_or(path)
         .to_string_lossy()
         .into_owned()
 }
@@ -4845,7 +5450,11 @@ fn change_action(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         decode_marker_contents, is_sidecar_marker_mirror, parse_marker,
@@ -4864,6 +5473,42 @@ mod tests {
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
             .collect()
+    }
+
+    fn test_config() -> Config {
+        Config {
+            bob_dir: PathBuf::from("/tmp/bob"),
+            lib_dir: PathBuf::from("/tmp/bob/lib"),
+            ref_dir: PathBuf::from("/tmp/bob/ref"),
+        }
+    }
+
+    fn test_config_for_bob_dir(bob_dir: PathBuf) -> Config {
+        Config {
+            lib_dir: bob_dir.join("lib"),
+            ref_dir: bob_dir.join("ref"),
+            bob_dir,
+        }
+    }
+
+    fn temp_bob_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "bob-cli-highlights-ref-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp bob dir");
+        path
+    }
+
+    fn write_test_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create test file parent");
+        }
+        fs::write(path, contents).expect("write test file");
     }
 
     #[test]
@@ -5226,15 +5871,17 @@ Note:
             path: PathBuf::from("example.md"),
             annotations,
         };
-        let config = Config {
-            bob_dir: PathBuf::from("/tmp/bob"),
-            lib_dir: PathBuf::from("/tmp/bob/lib"),
-            ref_dir: PathBuf::from("/tmp/bob/ref"),
-        };
+        let config = test_config();
         let pdf = Path::new("/tmp/bob/lib/example.pdf");
+        let ref_note = Path::new("/tmp/bob/ref/example.md");
 
-        let candidates =
-            super::annotation_task_candidates(&config, pdf, Some(&sidecar));
+        let candidates = super::annotation_task_candidates(
+            &config,
+            ref_note,
+            pdf,
+            Some(&sidecar),
+        )
+        .expect("extract annotation task candidates");
 
         assert_eq!(
             candidates
@@ -5265,6 +5912,160 @@ Note:
     }
 
     #[test]
+    fn annotation_task_route_suffix_is_strict_and_stripped_from_identity() {
+        assert_eq!(
+            super::split_annotation_task_route_suffix("#task Follow up @alice"),
+            ("#task Follow up".to_string(), Some("alice".to_string()))
+        );
+        assert_eq!(
+            super::split_annotation_task_route_suffix("#task Follow @a_b-2"),
+            ("#task Follow".to_string(), Some("a_b-2".to_string()))
+        );
+
+        for text in [
+            "#task Keep @alice.",
+            "#task Keep @alice/bob",
+            "#task Keep @alice.md",
+            "#task Keep @",
+            "#task Keep @-alice",
+            "#task Keep @..",
+            "#task@alice",
+        ] {
+            assert_eq!(
+                super::split_annotation_task_route_suffix(text),
+                (text.to_string(), None),
+                "{text}"
+            );
+        }
+
+        assert_eq!(
+            super::annotation_task_identity(
+                "#task Follow up @alice [created::2026-06-07]"
+            )
+            .as_deref(),
+            Some("#task Follow up")
+        );
+    }
+
+    #[test]
+    fn annotation_task_candidate_records_route_and_processed_id() {
+        let bob_dir = temp_bob_dir("candidate-route");
+        write_test_file(
+            &bob_dir.join("alice.md"),
+            "---\nparent: \"[[people]]\"\n---\n",
+        );
+        let config = test_config_for_bob_dir(bob_dir.clone());
+        let ref_note = bob_dir.join("ref/books/task-notes.md");
+        let candidates = super::annotation_task_candidates_from_text(
+            &config,
+            &ref_note,
+            "\
+- #task Follow up with Alice @alice
+- #task Keep unsafe token @alice.md
+",
+            "h-abc123",
+        )
+        .expect("extract routed task candidates");
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].task_text, "#task Follow up with Alice");
+        assert_eq!(candidates[0].identity, "#task Follow up with Alice");
+        assert_eq!(
+            candidates[0].target,
+            super::AnnotationTaskTarget::RoutedNote(bob_dir.join("alice.md"))
+        );
+        assert_eq!(
+            candidates[0].processed_id,
+            super::annotation_task_processed_id(
+                &config,
+                &ref_note,
+                "h-abc123",
+                "#task Follow up with Alice",
+            )
+        );
+        let rendered = super::render_annotation_task_line(
+            &config,
+            &candidates[0],
+            "2026-06-07",
+        );
+        assert!(
+            rendered.contains("[[ref/books/task-notes#^h-abc123|"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("[highlight_task:: "),
+            "processed marker missing: {rendered}"
+        );
+
+        assert_eq!(
+            candidates[1].target,
+            super::AnnotationTaskTarget::ReferenceNote
+        );
+        assert_eq!(
+            candidates[1].task_text,
+            "#task Keep unsafe token @alice.md"
+        );
+    }
+
+    #[test]
+    fn processed_task_index_scans_states_indents_and_done_notes() {
+        let bob_dir = temp_bob_dir("processed-index");
+        write_test_file(
+            &bob_dir.join("root.md"),
+            "\
+- [ ] #task Active [highlight_task:: active-id]
+  - [x] #task Nested child [highlight_task:: nested-id]
+- [-] #task Canceled @alice [cancelled::2026-06-08]
+",
+        );
+        write_test_file(
+            &bob_dir.join("done/alice_done.md"),
+            "- [x] #task Archived [[ref/books/task#^h-abc|x]] [highlight_task:: done-id] [created::2026-06-07]\n",
+        );
+        write_test_file(
+            &bob_dir.join(".git/ignored.md"),
+            "- [x] #task Ignored [highlight_task:: ignored-id]\n",
+        );
+        let config = test_config_for_bob_dir(bob_dir);
+
+        let index = super::processed_task_index(&config)
+            .expect("build processed index");
+
+        assert!(index.processed_ids.contains("active-id"));
+        assert!(index.processed_ids.contains("nested-id"));
+        assert!(index.processed_ids.contains("done-id"));
+        assert!(!index.processed_ids.contains("ignored-id"));
+        assert!(index.legacy_identities.contains("#task Active"));
+        assert!(index.legacy_identities.contains("#task Nested child"));
+        assert!(index.legacy_identities.contains("#task Archived"));
+        assert!(index.legacy_identities.contains("#task Canceled"));
+    }
+
+    #[test]
+    fn processed_task_index_legacy_identity_blocks_recreation() {
+        let bob_dir = temp_bob_dir("legacy-index");
+        write_test_file(
+            &bob_dir.join("done/old.md"),
+            "- [x] #task Existing follow-up [[ref/books/task#^h-old|x]] [created::2026-06-01]\n",
+        );
+        let config = test_config_for_bob_dir(bob_dir.clone());
+        let mut index = super::processed_task_index(&config)
+            .expect("build processed index");
+        let ref_note = bob_dir.join("ref/books/task.md");
+        let candidate = super::annotation_task_candidates_from_text(
+            &config,
+            &ref_note,
+            "- #task Existing follow-up\n",
+            "h-new",
+        )
+        .expect("extract candidate")
+        .pop()
+        .expect("candidate");
+
+        assert!(!index.accept(&candidate));
+    }
+
+    #[test]
     fn annotation_task_insertion_is_idempotent_and_preserves_existing_states() {
         let body = "\
 # Example
@@ -5285,14 +6086,19 @@ Keep me here.
 ";
         let block_id = "h-abc123def456";
         let alias = super::SOURCE_LINK_ALIAS;
+        let config = test_config();
+        let ref_note = Path::new("/tmp/bob/ref/example.md");
         let candidates = super::annotation_task_candidates_from_text(
+            &config,
+            ref_note,
             "\
 - #task Existing done
 - #task Existing cancelled
 - #task New follow-up [due::2026-06-08]
 ",
             block_id,
-        );
+        )
+        .expect("extract annotation task candidates");
 
         let updated = super::insert_missing_annotation_tasks(
             body,
@@ -5304,7 +6110,8 @@ Keep me here.
         // The created task carries a same-file block backlink between the
         // prose and the [created::] field.
         let new_line = format!(
-            "- [ ] #task New follow-up [due::2026-06-08] [[#^{block_id}|{alias}]] [created::2026-06-07]"
+            "- [ ] #task New follow-up [due::2026-06-08] [[#^{block_id}|{alias}]] [highlight_task:: {}] [created::2026-06-07]",
+            candidates[2].processed_id
         );
         assert!(
             updated.contains(&format!(
