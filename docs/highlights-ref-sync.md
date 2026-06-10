@@ -386,6 +386,47 @@ New generated notes include a title, a PDF wikilink Obsidian task line with
 Existing notes must already contain the managed begin/end markers; otherwise
 `sync` fails instead of guessing where generated content belongs.
 
+Generated annotations render as Obsidian callouts. Highlight text uses a
+`[!quote]` callout; a highlight comment is nested inside that quote as a
+`[!note] Comment` callout so the annotation's trailing `^h-...` block ID still
+covers the quote and the comment together. Standalone non-marker notes render as
+`[!note]` callouts. Removed annotation tombstones render under
+`### Removed highlights` as `[!warning] Removed highlight` callouts.
+
+Example generated body:
+
+```md
+### Page 12
+
+> [!quote] Latency is not throughput.
+>
+> > [!note] Comment Compare this with SLO notes.
+
+^h-2b91f0a4c7de
+
+> [!note] Keep this standalone observation.
+
+^h-8f42a61a90cc
+```
+
+Annotation text is beautified only while rendering the generated region:
+
+- Consecutive prose lines are reflowed into one line. Blank lines remain
+  paragraph breaks.
+- Markdown unordered list lines (`- `, `* `, `+ `, including task checkboxes)
+  start their own logical lines, and wrapped continuation text joins onto that
+  list item.
+- Hyphenated PDF line endings are healed at join points: lowercase next words
+  drop the hyphen (`through-` + `put` -> `throughput`), while uppercase or digit
+  next fragments keep it (`Marie-` + `Curie` -> `Marie-Curie`).
+- Ligature glyphs, non-breaking spaces, soft hyphens, zero-width characters,
+  doubled spaces, and tab runs are normalized away.
+
+The cleanup is render-only. Block IDs, annotation-task source links, and
+processed `[h:: ...]` markers continue to use the raw normalized sidecar text,
+so unchanged sidecar annotations keep their existing `^h-...` IDs when a note is
+regenerated with the callout format.
+
 The generated task line is a completion affordance:
 
 ```md
@@ -450,8 +491,10 @@ the annotation-level `^h-...` block and does not attach task-specific `^ht-...`
 block IDs to source task lines:
 
 ```md
-> [comment] #task Compare this claim with the appendix.
-> [comment] #task Email the citation to Alex.
+> [!quote] Highlighted claim.
+>
+> > [!note] Comment #task Compare this claim with the appendix.
+> > #task Email the citation to Alex.
 
 ^h-2b91f0a4c7de
 ```

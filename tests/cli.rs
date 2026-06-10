@@ -2142,7 +2142,7 @@ Note: marker note
         fs::read_to_string(&second_note).expect("read second note");
     assert!(
         first_contents.contains("ref_type: books\n")
-            && first_contents.contains("> First quote.\n"),
+            && first_contents.contains("> [!quote] First quote.\n"),
         "{first_contents}"
     );
     assert!(
@@ -2156,7 +2156,7 @@ Note: marker note
     );
     assert!(
         second_contents.contains("ref_type: papers\n")
-            && second_contents.contains("> Second quote.\n"),
+            && second_contents.contains("> [!quote] Second quote.\n"),
         "{second_contents}"
     );
     assert!(
@@ -4221,16 +4221,16 @@ Note: Keep a standalone observation after the marker.
     assert!(!contents.contains("## My Notes\n"), "{contents}");
     assert!(contents.contains("### Page 12\n"), "{contents}");
     assert!(
-        contents.contains("> Latency is not throughput.\n"),
+        contents.contains("> [!quote] Latency is not throughput.\n"),
         "{contents}"
     );
     assert!(
-        contents.contains("> [comment] Compare this with SLO notes.\n"),
+        contents.contains("> > [!note] Comment Compare this with SLO notes.\n"),
         "{contents}"
     );
     assert!(
         contents.contains(
-            "> [note] Keep a standalone observation after the marker.\n"
+            "> [!note] Keep a standalone observation after the marker.\n"
         ),
         "{contents}"
     );
@@ -4331,35 +4331,83 @@ Some note...
     assert!(contents.contains("### Page 6\n"), "{contents}");
     assert!(
         contents.contains(
-            "> It only writes the PDF marker when frontmatter is the selected\n> source and --write-pdf is supplied.\n"
+            "> [!quote] It only writes the PDF marker when frontmatter is the selected source and --write-pdf is supplied.\n"
         ),
         "{contents}"
     );
     assert!(
-        contents.contains("> [comment] Support sase tool call replay?\n"),
+        contents
+            .contains("> > [!note] Comment Support sase tool call replay?\n"),
         "{contents}"
     );
     assert!(
-        !contents.contains("> [comment] - Support sase tool call replay?"),
+        !contents.contains("[!note] Comment - Support sase tool call replay?"),
         "linked bullet comment marker should be stripped:\n{contents}"
     );
     assert!(
-        contents.contains("> Comment: Compare this with SLO notes.\n"),
+        contents.contains("> [!quote] Comment: Compare this with SLO notes.\n"),
         "{contents}"
     );
     assert!(
-        contents.contains("> [comment] Some note...\n"),
+        contents.contains("> > [!note] Comment Some note...\n"),
         "{contents}"
     );
     assert!(
-        !contents.contains("> Highlights Reference Note Sync\n"),
+        !contents.contains("> [!quote] Highlights Reference Note Sync\n"),
         "linked marker mirror title should not render as a highlight:\n{contents}"
     );
     assert!(
-        !contents.contains("> [comment] - status: wip"),
+        !contents.contains("[!note] Comment - status: wip"),
         "linked marker mirror fields should not render as a comment:\n{contents}"
     );
     assert_eq!(highlight_block_ids(&contents).len(), 2, "{contents}");
+}
+
+#[test]
+fn highlights_ref_sync_beautifies_linked_sidecar_rendering() {
+    let temp = TempDir::new("bob-cli-highlights-ref-beautify");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/books/beautify.pdf");
+    let sidecar = pdf.with_extension("md");
+    let note = vault.join("ref/books/beautify.md");
+    write_highlights_pdf(
+        &pdf,
+        "- status: wip\n- parent: obsidian\n- title: Beautify\n",
+    );
+    write_file(
+        &sidecar,
+        "\
+# Beautify
+
+#### [Page 2](highlights://beautify#page=2)
+
+##### 2026-06-10:
+
+> Confusing latency and through-
+put leads to mis-sized capa-
+city plans with \u{fb01}les.
+
+- Compare this with SLO notes.
+",
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("sync beautified linked sidecar");
+
+    assert_success(&output);
+    let contents = fs::read_to_string(&note).expect("read generated note");
+    assert!(
+        contents.contains(
+            "> [!quote] Confusing latency and throughput leads to mis-sized capacity plans with files.\n>\n> > [!note] Comment Compare this with SLO notes.\n"
+        ),
+        "{contents}"
+    );
+    assert_eq!(highlight_block_ids(&contents).len(), 1, "{contents}");
 }
 
 #[test]
@@ -4489,15 +4537,16 @@ Note:
     assert_ne!(reconcile_id, ask_id, "comment and note tasks differ");
 
     assert!(
-        contents.contains("> [comment] #task Reconcile with chapter 3.\n"),
+        contents
+            .contains("> > [!note] Comment #task Reconcile with chapter 3.\n"),
         "{contents}"
     );
     assert!(
-        contents.contains("> Keep this bullet as a comment.\n"),
+        contents.contains("> > Keep this bullet as a comment.\n"),
         "{contents}"
     );
     assert!(
-        contents.contains("> [note] - #task Ask about the standalone note.\n"),
+        contents.contains("> [!note] - #task Ask about the standalone note.\n"),
         "{contents}"
     );
     assert!(
@@ -4718,7 +4767,7 @@ Note: marker note mirrored from the PDF
     );
     assert!(
         ref_contents
-            .contains("> [comment] #task Follow up with Alice @alice\n")
+            .contains("> > [!note] Comment #task Follow up with Alice @alice\n")
             && !ref_contents.contains(" ^ht-"),
         "managed source should render without task-specific anchors:\n{ref_contents}"
     );
@@ -5072,8 +5121,14 @@ Comment: revised comment
     assert_success(&output);
     let updated = fs::read_to_string(&note).expect("read updated note");
     assert_eq!(highlight_block_ids(&updated), initial_ids, "{updated}");
-    assert!(updated.contains("[comment] revised comment"), "{updated}");
-    assert!(!updated.contains("[comment] first comment"), "{updated}");
+    assert!(
+        updated.contains("[!note] Comment revised comment"),
+        "{updated}"
+    );
+    assert!(
+        !updated.contains("[!note] Comment first comment"),
+        "{updated}"
+    );
 }
 
 #[test]
@@ -5142,7 +5197,14 @@ Note: marker note
         updated.contains(&format!("^{deleted_id}\n")),
         "deleted block id should remain as a tombstone:\n{updated}"
     );
-    assert!(!updated.contains("> Deleted quote.\n"), "{updated}");
+    assert!(
+        updated.contains("> [!warning] Removed highlight This annotation is no longer present in the Highlights sidecar.\n"),
+        "{updated}"
+    );
+    assert!(
+        !updated.contains("> [!quote] Deleted quote.\n"),
+        "{updated}"
+    );
 }
 
 #[test]
@@ -5208,7 +5270,7 @@ Comment: added later
     let updated = fs::read_to_string(&note).expect("read updated note");
     assert!(updated.contains("owner: Bryan\n"), "{updated}");
     assert!(updated.contains("Manual synthesis.\n"), "{updated}");
-    assert!(updated.contains("[comment] added later"), "{updated}");
+    assert!(updated.contains("[!note] Comment added later"), "{updated}");
 
     let unsafe_pdf = vault.join("lib/unsafe.pdf");
     let unsafe_note = vault.join("ref/unsafe.md");

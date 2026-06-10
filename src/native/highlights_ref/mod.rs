@@ -2316,7 +2316,13 @@ fn render_sidecar_highlights(
         rendered.push_str(REMOVED_HIGHLIGHTS_HEADING);
         rendered.push_str("\n\n");
         for block_id in removed_ids {
-            rendered.push_str("> [removed] This annotation is no longer present in the Highlights sidecar.\n\n");
+            push_callout_block(
+                &mut rendered,
+                1,
+                "[!warning] Removed highlight",
+                "This annotation is no longer present in the Highlights sidecar.",
+            );
+            rendered.push('\n');
             rendered.push('^');
             rendered.push_str(&block_id);
             rendered.push_str("\n\n");
@@ -2357,14 +2363,26 @@ fn render_annotation_block(
     let mut rendered = String::new();
     match annotation.kind {
         SidecarAnnotationKind::Highlight => {
-            push_blockquote(&mut rendered, None, &annotation.text);
+            let text = beautify_annotation_text(&annotation.text);
+            push_callout_block(&mut rendered, 1, "[!quote]", &text);
             if let Some(comment) = &annotation.comment {
+                let comment_source =
+                    annotation.task_source.as_deref().unwrap_or(comment);
+                let comment = strip_comment_label(&beautify_annotation_text(
+                    comment_source,
+                ));
                 rendered.push_str(">\n");
-                push_blockquote(&mut rendered, Some("[comment] "), comment);
+                push_callout_block(
+                    &mut rendered,
+                    2,
+                    "[!note] Comment",
+                    &comment,
+                );
             }
         }
         SidecarAnnotationKind::StandaloneNote => {
-            push_blockquote(&mut rendered, Some("[note] "), &annotation.text);
+            let text = beautify_annotation_text(&annotation.text);
+            push_callout_block(&mut rendered, 1, "[!note]", &text);
         }
     }
     rendered.push('\n');
@@ -2374,21 +2392,55 @@ fn render_annotation_block(
     rendered
 }
 
-fn push_blockquote(
+fn push_callout_block(
     rendered: &mut String,
-    first_prefix: Option<&str>,
+    depth: usize,
+    header: &str,
     text: &str,
 ) {
-    for (index, line) in text.lines().enumerate() {
-        rendered.push_str("> ");
-        if index == 0
-            && let Some(prefix) = first_prefix
-        {
-            rendered.push_str(prefix);
-        }
-        rendered.push_str(line);
-        rendered.push('\n');
+    debug_assert!(depth > 0);
+    let prefix = blockquote_prefix(depth);
+    let mut lines = text.lines();
+
+    rendered.push_str(&prefix);
+    rendered.push_str(header);
+    if let Some(first_line) = lines.next()
+        && !first_line.is_empty()
+    {
+        rendered.push(' ');
+        rendered.push_str(first_line);
     }
+    rendered.push('\n');
+
+    for line in lines {
+        push_prefixed_blockquote_line(rendered, &prefix, line);
+    }
+}
+
+fn blockquote_prefix(depth: usize) -> String {
+    let mut prefix = String::new();
+    for level in 0..depth {
+        if level > 0 {
+            prefix.push(' ');
+        }
+        prefix.push('>');
+    }
+    prefix.push(' ');
+    prefix
+}
+
+fn push_prefixed_blockquote_line(
+    rendered: &mut String,
+    prefix: &str,
+    line: &str,
+) {
+    if line.is_empty() {
+        rendered.push_str(prefix.trim_end());
+    } else {
+        rendered.push_str(prefix);
+        rendered.push_str(line);
+    }
+    rendered.push('\n');
 }
 
 impl SidecarAnnotationKind {
@@ -2625,6 +2677,183 @@ fn normalize_annotation_text(lines: &[String]) -> String {
         normalized.pop();
     }
     normalized.join("\n")
+}
+
+struct ReflowLine {
+    text: String,
+    ended_with_soft_hyphen: bool,
+}
+
+fn clean_pdf_text_artifacts(text: &str) -> String {
+    text.split('\n')
+        .map(clean_pdf_text_artifacts_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clean_pdf_text_artifacts_line(line: &str) -> String {
+    let mut cleaned = String::new();
+    let mut pending_space = false;
+    for character in line.chars() {
+        match character {
+            '\u{fb00}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "ff")
+            }
+            '\u{fb01}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "fi")
+            }
+            '\u{fb02}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "fl")
+            }
+            '\u{fb03}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "ffi")
+            }
+            '\u{fb04}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "ffl")
+            }
+            '\u{fb05}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "ft")
+            }
+            '\u{fb06}' => {
+                push_cleaned_fragment(&mut cleaned, &mut pending_space, "st")
+            }
+            '\u{00ad}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
+            | '\u{feff}' => {}
+            ' ' | '\t' | '\r' | '\u{00a0}' | '\u{2007}' | '\u{202f}' => {
+                pending_space = true
+            }
+            character if character.is_whitespace() => pending_space = true,
+            character => {
+                if pending_space && !cleaned.is_empty() {
+                    cleaned.push(' ');
+                }
+                pending_space = false;
+                cleaned.push(character);
+            }
+        }
+    }
+    cleaned
+}
+
+fn push_cleaned_fragment(
+    cleaned: &mut String,
+    pending_space: &mut bool,
+    fragment: &str,
+) {
+    if *pending_space && !cleaned.is_empty() {
+        cleaned.push(' ');
+    }
+    *pending_space = false;
+    cleaned.push_str(fragment);
+}
+
+fn beautify_annotation_text(text: &str) -> String {
+    let cleaned_text = clean_pdf_text_artifacts(text);
+    let mut rendered = Vec::new();
+    let mut current = None::<ReflowLine>;
+
+    for (raw_line, line) in text.split('\n').zip(cleaned_text.split('\n')) {
+        let line = line.trim().to_string();
+        let ended_with_soft_hyphen = ends_with_soft_hyphen(raw_line);
+
+        if line.is_empty() {
+            flush_reflow_line(&mut rendered, &mut current);
+            if !rendered.is_empty()
+                && !rendered.last().is_some_and(String::is_empty)
+            {
+                rendered.push(String::new());
+            }
+            continue;
+        }
+
+        if is_markdown_unordered_list_line(&line) {
+            flush_reflow_line(&mut rendered, &mut current);
+            current = Some(ReflowLine {
+                text: line,
+                ended_with_soft_hyphen,
+            });
+            continue;
+        }
+
+        if let Some(current) = &mut current {
+            append_reflow_fragment(
+                &mut current.text,
+                &line,
+                current.ended_with_soft_hyphen,
+            );
+            current.ended_with_soft_hyphen = ended_with_soft_hyphen;
+        } else {
+            current = Some(ReflowLine {
+                text: line,
+                ended_with_soft_hyphen,
+            });
+        }
+    }
+
+    flush_reflow_line(&mut rendered, &mut current);
+    while rendered.last().is_some_and(String::is_empty) {
+        rendered.pop();
+    }
+    rendered.join("\n")
+}
+
+fn flush_reflow_line(
+    rendered: &mut Vec<String>,
+    current: &mut Option<ReflowLine>,
+) {
+    if let Some(line) = current.take() {
+        rendered.push(line.text);
+    }
+}
+
+fn append_reflow_fragment(
+    current: &mut String,
+    fragment: &str,
+    previous_ended_with_soft_hyphen: bool,
+) {
+    if previous_ended_with_soft_hyphen {
+        current.push_str(fragment);
+        return;
+    }
+
+    let mut current_chars = current.chars().rev();
+    if let Some(last) = current_chars.next()
+        && matches!(last, '-' | '‐')
+        && current_chars.next().is_some_and(char::is_alphabetic)
+        && let Some(first) = fragment.chars().next()
+    {
+        if first.is_lowercase() {
+            current.pop();
+            current.push_str(fragment);
+            return;
+        }
+        if first.is_uppercase() || first.is_ascii_digit() {
+            current.push_str(fragment);
+            return;
+        }
+    }
+
+    if !current.is_empty() {
+        current.push(' ');
+    }
+    current.push_str(fragment);
+}
+
+fn ends_with_soft_hyphen(line: &str) -> bool {
+    line.trim_end_matches(|character| {
+        matches!(
+            character,
+            ' ' | '\t' | '\r' | '\u{00a0}' | '\u{2007}' | '\u{202f}'
+        )
+    })
+    .ends_with('\u{00ad}')
+}
+
+fn is_markdown_unordered_list_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let mut characters = trimmed.chars();
+    matches!(characters.next(), Some('-' | '*' | '+'))
+        && characters.next().is_some_and(char::is_whitespace)
 }
 
 fn normalized_identity_text(text: &str) -> String {
@@ -6012,6 +6241,57 @@ Note:
     }
 
     #[test]
+    fn pdf_text_artifact_cleanup_normalizes_extraction_noise() {
+        assert_eq!(
+            super::clean_pdf_text_artifacts(
+                "A\u{00a0}\u{2007}\u{202f}B\t\tC \u{fb00}\u{fb01}\u{fb02}\u{fb03}\u{fb04}\u{fb05}\u{fb06}\u{00ad}\u{200b}\u{feff}"
+            ),
+            "A B C fffiflffifflftst"
+        );
+    }
+
+    #[test]
+    fn beautify_annotation_text_reflows_and_dehyphenates() {
+        assert_eq!(
+            super::beautify_annotation_text(
+                "\
+Confusing latency and through-
+put leads to mis-sized capa-
+city plans for Marie-
+Curie and soft\u{00ad}
+ware.
+
+Next paragraph keeps a
+blank line.
+"
+            ),
+            "\
+Confusing latency and throughput leads to mis-sized capacity plans for Marie-Curie and software.
+
+Next paragraph keeps a blank line."
+        );
+    }
+
+    #[test]
+    fn beautify_annotation_text_preserves_list_structure() {
+        assert_eq!(
+            super::beautify_annotation_text(
+                "\
+- #task Follow the first wrapped
+  continuation line.
+* Keep the second item
+wrapped too.
++ Plain plus item.
+"
+            ),
+            "\
+- #task Follow the first wrapped continuation line.
+* Keep the second item wrapped too.
++ Plain plus item."
+        );
+    }
+
+    #[test]
     fn rendered_annotation_blocks_do_not_include_source_task_anchors() {
         let annotations = parse_sidecar_markdown(
             "\
@@ -6068,7 +6348,7 @@ Note:
         );
         assert!(
             rendered.content.contains(
-                "> [note] - #task Follow up on the standalone note.\n"
+                "> [!note] - #task Follow up on the standalone note.\n"
             ),
             "{}",
             rendered.content
@@ -6079,6 +6359,85 @@ Note:
                 .contains("> - Untagged standalone bullet.\n"),
             "{}",
             rendered.content
+        );
+    }
+
+    #[test]
+    fn render_sidecar_highlights_beautifies_callout_text() {
+        let annotations = parse_sidecar_markdown(
+            "\
+## Page 2
+
+Note: marker note mirrored from the PDF
+
+---
+
+> Confusing latency and through-
+> put leads to mis-sized capa-
+> city plans with \u{fb01}les.
+
+Comment: Compare this with SLO notes.
+",
+        );
+        let sidecar = super::SidecarInput {
+            path: PathBuf::from("example.md"),
+            annotations,
+        };
+        let config = test_config();
+        let pdf = Path::new("/tmp/bob/lib/example.pdf");
+        let ref_note = Path::new("/tmp/bob/ref/example.md");
+        let note = super::ParsedNote::empty();
+
+        let rendered = super::render_sidecar_highlights(
+            &config, pdf, ref_note, &note, &sidecar,
+        )
+        .expect("render beautified annotation block");
+
+        assert!(
+            rendered.content.contains(
+                "> [!quote] Confusing latency and throughput leads to mis-sized capacity plans with files.\n"
+            ),
+            "{}",
+            rendered.content
+        );
+        assert!(
+            rendered
+                .content
+                .contains("> > [!note] Comment Compare this with SLO notes.\n"),
+            "{}",
+            rendered.content
+        );
+        assert_eq!(super::generated_block_ids(&rendered.content).len(), 1);
+    }
+
+    #[test]
+    fn annotation_block_id_is_stable_across_space_wrapping() {
+        let config = test_config();
+        let pdf = Path::new("/tmp/bob/lib/example.pdf");
+        let mut first = super::SidecarAnnotation {
+            kind: SidecarAnnotationKind::Highlight,
+            page_label: Some("Page 2".to_string()),
+            linked_page_style: true,
+            text: "Stable quoted text continues across\nphysical lines."
+                .to_string(),
+            comment: None,
+            task_source: None,
+            order: 0,
+            ordinal_on_page: 0,
+        };
+        let mut second = first.clone();
+        second.text =
+            "Stable quoted text\ncontinues across physical lines.".to_string();
+
+        assert_eq!(
+            super::annotation_block_id(&config, pdf, &first),
+            super::annotation_block_id(&config, pdf, &second)
+        );
+
+        first.comment = Some("Comment changes do not affect IDs.".to_string());
+        assert_eq!(
+            super::annotation_block_id(&config, pdf, &first),
+            super::annotation_block_id(&config, pdf, &second)
         );
     }
 
