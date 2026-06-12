@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-12 07:55:09
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_header_jump_zt_scroll.md
 ---
 # Plan: Scroll Jumped-To Section Header to Top of Viewport (vim `zt` behavior)
