@@ -70,6 +70,12 @@ Task statuses follow the Tasks plugin convention:
   `dash.md`'s Tasks section.
 - Active projects with unprioritized open tasks or open sub-projects get
   `[p::2]` added back to their open `^prj` task immediately before `^prj`.
+- Active projects with open `^prj` tasks get one plain child wikilink bullet
+  nested directly under `^prj` for each open sub-project, such as
+  `- [[child_project]]`.
+- A pure wikilink bullet under `^prj` whose target is no longer an open
+  sub-project is removed. Bullets with extra text are never removed, so
+  `- [[child_project]] kickoff notes` is the escape hatch for manual prose.
 - Existing `[scheduled::...]` fields are removed from open `^prj` tasks on
   active projects. `scheduled` is no longer used for project surfacing.
 - Terminal projects, `status: done` or `status: canceled`, never get `^prj`
@@ -84,6 +90,11 @@ An open sub-project is another project note whose `parent` wikilink resolves to
 this note's file stem and whose own `^prj` task is open. Checked, canceled,
 missing, malformed, or multiple `^prj` child tasks do not keep the parent
 hidden.
+
+Generated sub-project bullets use the child note's file stem with its original
+casing and no path or alias. `sync` checks every wikilink in the direct `^prj`
+sub-block before adding a bullet, so a manual bullet with extra text suppresses
+a duplicate generated link.
 
 In `bob projects list`, the `UNPRI` column is the open unprioritized task count.
 An open `^prj` task with a `p` field renders as `open`; an open `^prj` task
@@ -126,7 +137,9 @@ Typical action output:
   ok sase_blog  status: wip -> done  ^prj task checked
   ok bob        removed [p::2] from ^prj  no unprioritized open tasks or open sub-projects
   ok athena     added [p::2] to ^prj  project has open sub-projects
+  ok athena     added [[sase_blog]] to ^prj  open sub-project
+  ok athena     removed [[old_child]] from ^prj  no longer an open sub-project
   warning outlive  active project has no ^prj task  add `- [ ] #task <completion criteria> [p::2] ^prj`
 
-11 projects - 1 status updated - 2 ^prj edited - 1 warnings
+11 projects - 1 status updated - 4 ^prj edited - 1 warnings
 ```

@@ -1896,6 +1896,10 @@ fn projects_sync_hides_parent_projects_with_open_subprojects() {
         &vault.join("ChildAdd.md"),
         "---\ntype: [[project]]\nstatus: wip\nparent: [[projects/ParentAdd#Now|parent]]\n---\n- [ ] #task Finish child [p::2] ^prj\n- [ ] #task Needs priority\n",
     );
+    write_file(
+        &vault.join("ChildAlpha.md"),
+        "---\ntype: [[project]]\nstatus: wip\nparent: [[ParentAdd]]\n---\n- [ ] #task Finish alpha [p::2] ^prj\n- [ ] #task Needs priority\n",
+    );
 
     let parent_add_snapshot =
         fs::read_to_string(vault.join("ParentAdd.md")).expect("read parent");
@@ -1912,8 +1916,13 @@ fn projects_sync_hides_parent_projects_with_open_subprojects() {
     let out = stdout(&output);
     assert!(
         out.contains("would add [p::2] to ^prj  project has open sub-projects")
+            && out
+                .contains("would add [[ChildKeep]] to ^prj  open sub-project")
+            && out.contains("would add [[ChildAdd]] to ^prj  open sub-project")
+            && out
+                .contains("would add [[ChildAlpha]] to ^prj  open sub-project")
             && out.contains(
-                "4 projects - 0 status updated - 1 ^prj edited - 0 warnings"
+                "5 projects - 0 status updated - 4 ^prj edited - 0 warnings"
             ),
         "unexpected dry-run output:\n{out}"
     );
@@ -1935,18 +1944,21 @@ fn projects_sync_hides_parent_projects_with_open_subprojects() {
     let out = stdout(&output);
     assert!(
         out.contains("added [p::2] to ^prj  project has open sub-projects")
+            && out.contains("added [[ChildKeep]] to ^prj  open sub-project")
+            && out.contains("added [[ChildAdd]] to ^prj  open sub-project")
+            && out.contains("added [[ChildAlpha]] to ^prj  open sub-project")
             && out.contains(
-                "4 projects - 0 status updated - 1 ^prj edited - 0 warnings"
+                "5 projects - 0 status updated - 4 ^prj edited - 0 warnings"
             ),
         "unexpected sync output:\n{out}"
     );
     assert_eq!(
         fs::read_to_string(vault.join("ParentKeep.md")).expect("read parent"),
-        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent keep [p::2] ^prj\n"
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent keep [p::2] ^prj\n\t- [[ChildKeep]]\n"
     );
     assert_eq!(
         fs::read_to_string(vault.join("ParentAdd.md")).expect("read parent"),
-        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent add [p::2] ^prj\n"
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent add [p::2] ^prj\n\t- [[ChildAdd]]\n\t- [[ChildAlpha]]\n"
     );
 
     let output = bob_command()
@@ -1960,7 +1972,7 @@ fn projects_sync_hides_parent_projects_with_open_subprojects() {
     assert_success(&output);
     assert!(
         stdout(&output).contains(
-            "4 projects - 0 status updated - 0 ^prj edited - 0 warnings"
+            "5 projects - 0 status updated - 0 ^prj edited - 0 warnings"
         ),
         "second run should have zero actions:\n{}",
         format_output(&output)
@@ -1974,7 +1986,7 @@ fn projects_sync_unhides_parent_when_child_prj_is_checked_same_run() {
 
     write_file(
         &vault.join("Parent.md"),
-        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent [p::2] ^prj\n",
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent [p::2] ^prj\n\t- [[Child]]\n",
     );
     write_file(
         &vault.join("Child.md"),
@@ -1997,7 +2009,10 @@ fn projects_sync_unhides_parent_when_child_prj_is_checked_same_run() {
                 "removed [p::2] from ^prj  no unprioritized open tasks or open sub-projects"
             )
             && out.contains(
-                "2 projects - 1 status updated - 1 ^prj edited - 0 warnings"
+                "removed [[Child]] from ^prj  no longer an open sub-project"
+            )
+            && out.contains(
+                "2 projects - 1 status updated - 2 ^prj edited - 0 warnings"
             ),
         "unexpected sync output:\n{out}"
     );
@@ -2076,6 +2091,84 @@ fn projects_sync_treats_children_without_open_prj_as_childless() {
         fs::read_to_string(vault.join("ParentCheckedChild.md"))
             .expect("read parent"),
         "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent ^prj\n"
+    );
+}
+
+#[test]
+fn projects_sync_removes_stale_subproject_links_but_keeps_prose() {
+    let temp = TempDir::new("bob-cli-projects-sync-stale-subproject-links");
+    let vault = temp.path().join("vault");
+
+    write_file(
+        &vault.join("Parent.md"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent [p::2] ^prj\n\t- [[OldChild]]\n\t- [[ManualNote]] kickoff notes stay\n- [ ] #task Needs priority\n",
+    );
+
+    let output = bob_command()
+        .arg("projects")
+        .arg("sync")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .output()
+        .expect("run bob projects sync");
+
+    assert_success(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "removed [[OldChild]] from ^prj  no longer an open sub-project"
+        ) && out.contains(
+            "1 projects - 0 status updated - 1 ^prj edited - 0 warnings"
+        ),
+        "unexpected sync output:\n{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("Parent.md")).expect("read parent"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent [p::2] ^prj\n\t- [[ManualNote]] kickoff notes stay\n- [ ] #task Needs priority\n"
+    );
+}
+
+#[test]
+fn projects_sync_subproject_link_dry_run_reports_without_writing() {
+    let temp = TempDir::new("bob-cli-projects-sync-subproject-links-dry-run");
+    let vault = temp.path().join("vault");
+
+    write_file(
+        &vault.join("Parent.md"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent [p::2] ^prj\n\t- [[OldChild]]\n",
+    );
+    write_file(
+        &vault.join("Child.md"),
+        "---\ntype: [[project]]\nstatus: wip\nparent: [[Parent]]\n---\n- [ ] #task Finish child [p::2] ^prj\n- [ ] #task Needs priority\n",
+    );
+    let parent_snapshot =
+        fs::read_to_string(vault.join("Parent.md")).expect("read parent");
+
+    let output = bob_command()
+        .arg("projects")
+        .arg("sync")
+        .arg("--dry-run")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .output()
+        .expect("run bob projects sync dry-run");
+
+    assert_success(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("would add [[Child]] to ^prj  open sub-project")
+            && out.contains(
+                "would remove [[OldChild]] from ^prj  no longer an open sub-project"
+            )
+            && out.contains(
+                "2 projects - 0 status updated - 2 ^prj edited - 0 warnings"
+            ),
+        "unexpected dry-run output:\n{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("Parent.md")).expect("read parent"),
+        parent_snapshot,
+        "dry-run must not edit parent"
     );
 }
 

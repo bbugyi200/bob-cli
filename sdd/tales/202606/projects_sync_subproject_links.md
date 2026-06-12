@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-12 14:01:11
-status: wip
+status: done
 prompt: sdd/prompts/202606/projects_sync_subproject_links.md
 ---
 # Plan: `bob projects sync` — maintain sub-project link bullets under the `^prj` task

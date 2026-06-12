@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     ffi::OsString,
     fs, io,
@@ -60,7 +60,7 @@ anchored with ^prj.\n\n\
 The list subcommand is read-only: it scans project notes, counts open #task \
 items, counts open unprioritized tasks, and shows the current ^prj state. The \
 sync subcommand updates project status and manages the ^prj task's [p::2] \
-field from that same ^prj line.",
+field and sub-project link bullets from that same ^prj line.",
         )
         .after_help(
             "Examples:\n  bob projects list\n  bob projects sync --dry-run\n  bob projects sync -b ~/bob",
@@ -90,7 +90,8 @@ A checked ^prj task sets frontmatter status to done. A canceled ^prj task sets \
 status to canceled. Active projects with no unprioritized open tasks and no \
 open sub-projects have the [p::2] field removed from their open ^prj task so \
 it surfaces in dash.md's Tasks section; projects with unprioritized open tasks \
-or open sub-projects get [p::2] added back.",
+or open sub-projects get [p::2] added back. Sync also maintains plain \
+sub-project link bullets nested directly under open ^prj tasks.",
         )
         .after_help(
             "Examples:\n  bob projects sync --dry-run\n  bob projects sync -d -b ~/bob\n  bob projects sync --bob-dir /tmp/bob-vault",
@@ -214,6 +215,7 @@ struct Project {
     relative_path: PathBuf,
     name: String,
     link_name: String,
+    link_stem: String,
     parent_target: Option<String>,
     status: ProjectStatus,
     open_task_count: usize,
@@ -325,6 +327,7 @@ struct PrjTask {
     description: String,
     priority: Option<String>,
     placeholder: bool,
+    sub_block: PrjSubBlock,
 }
 
 impl PrjTask {
@@ -335,6 +338,7 @@ impl PrjTask {
             description: String::new(),
             priority: None,
             placeholder: false,
+            sub_block: PrjSubBlock::default(),
         }
     }
 
@@ -345,6 +349,7 @@ impl PrjTask {
             description: String::new(),
             priority: None,
             placeholder: false,
+            sub_block: PrjSubBlock::default(),
         }
     }
 
@@ -368,6 +373,34 @@ enum PrjTaskState {
     Canceled,
     Malformed,
     Multiple,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PrjSubBlock {
+    lines: Vec<PrjSubBlockLine>,
+}
+
+impl PrjSubBlock {
+    fn linked_targets(&self) -> HashSet<String> {
+        self.lines
+            .iter()
+            .flat_map(|line| line.wikilink_targets.iter().cloned())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrjSubBlockLine {
+    line_number: usize,
+    indentation: String,
+    pure_link: Option<WikilinkRef>,
+    wikilink_targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WikilinkRef {
+    link_name: String,
+    stem: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +433,7 @@ struct ParsedTaskLine<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrjCandidate<'a> {
     line_number: usize,
+    line_index: usize,
     line: &'a str,
 }
 
@@ -590,6 +624,14 @@ enum ProjectChange {
     RemoveScheduled {
         scheduled: String,
     },
+    AddSubprojectLink {
+        stem: String,
+    },
+    RemoveSubprojectLink {
+        target: String,
+        stem: String,
+        line_number: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -635,6 +677,18 @@ impl ProjectChange {
                 field: format!("[scheduled::{scheduled}]"),
                 reason: "scheduled is no longer used".to_string(),
             },
+            Self::AddSubprojectLink { stem } => SyncEvent::PrjEdit {
+                project_name: project_name.to_string(),
+                action: PrjEditAction::Add,
+                field: format!("[[{stem}]]"),
+                reason: "open sub-project".to_string(),
+            },
+            Self::RemoveSubprojectLink { stem, .. } => SyncEvent::PrjEdit {
+                project_name: project_name.to_string(),
+                action: PrjEditAction::Remove,
+                field: format!("[[{stem}]]"),
+                reason: "no longer an open sub-project".to_string(),
+            },
         }
     }
 }
@@ -673,10 +727,10 @@ fn sync_projects(bob_dir: &Path, dry_run: bool) -> SyncReport {
     let mut report = SyncReport::default();
     let mut files = Vec::new();
     collect_sync_directory(bob_dir, bob_dir, &mut report, &mut files);
-    let open_subproject_parents = open_subproject_parent_link_names(
+    let open_subproject_children = open_subproject_children_by_parent_link_name(
         files.iter().filter_map(SyncFile::clean_project),
     );
-    apply_sync_plans(&files, &open_subproject_parents, dry_run, &mut report);
+    apply_sync_plans(&files, &open_subproject_children, dry_run, &mut report);
     report
 }
 
@@ -760,7 +814,7 @@ fn collect_sync_markdown_file(
 
 fn apply_sync_plans(
     files: &[SyncFile],
-    open_subproject_parents: &HashSet<String>,
+    open_subproject_children: &HashMap<String, Vec<String>>,
     dry_run: bool,
     report: &mut SyncReport,
 ) {
@@ -769,9 +823,11 @@ fn apply_sync_plans(
             continue;
         }
 
-        let has_open_subprojects =
-            open_subproject_parents.contains(&file.project.link_name);
-        let plan = plan_project_sync(&file.project, has_open_subprojects);
+        let open_children = open_subproject_children
+            .get(&file.project.link_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let plan = plan_project_sync(&file.project, open_children);
         report.events.extend(plan.warnings);
 
         if plan.changes.is_empty() {
@@ -806,22 +862,40 @@ fn apply_sync_plans(
     }
 }
 
-fn open_subproject_parent_link_names<'a>(
+fn open_subproject_children_by_parent_link_name<'a>(
     projects: impl IntoIterator<Item = &'a Project>,
-) -> HashSet<String> {
-    projects
+) -> HashMap<String, Vec<String>> {
+    let mut children_by_parent: HashMap<String, BTreeMap<String, String>> =
+        HashMap::new();
+
+    for project in projects {
+        if project.prj_task.state != PrjTaskState::Open {
+            continue;
+        }
+        let Some(parent) = &project.parent_target else {
+            continue;
+        };
+        if parent == &project.link_name {
+            continue;
+        }
+        children_by_parent
+            .entry(parent.clone())
+            .or_default()
+            .entry(project.link_name.clone())
+            .or_insert_with(|| project.link_stem.clone());
+    }
+
+    children_by_parent
         .into_iter()
-        .filter(|project| project.prj_task.state == PrjTaskState::Open)
-        .filter_map(|project| {
-            let parent = project.parent_target.as_ref()?;
-            (parent != &project.link_name).then(|| parent.clone())
+        .map(|(parent, children)| {
+            (parent, children.into_values().collect::<Vec<_>>())
         })
         .collect()
 }
 
 fn plan_project_sync(
     project: &Project,
-    has_open_subprojects: bool,
+    open_subproject_stems: &[String],
 ) -> ProjectPlan {
     let mut plan = ProjectPlan::default();
 
@@ -868,6 +942,7 @@ fn plan_project_sync(
     if !effective_status.is_terminal()
         && project.prj_task.state == PrjTaskState::Open
     {
+        let has_open_subprojects = !open_subproject_stems.is_empty();
         let should_surface =
             project.open_unprioritized_count == 0 && !has_open_subprojects;
         if should_surface {
@@ -885,6 +960,33 @@ fn plan_project_sync(
             plan.changes.push(ProjectChange::AddPriority { reason });
         }
 
+        let open_subproject_targets = open_subproject_stems
+            .iter()
+            .map(|stem| stem.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let linked_targets = project.prj_task.sub_block.linked_targets();
+
+        for stem in open_subproject_stems {
+            if !linked_targets.contains(&stem.to_ascii_lowercase()) {
+                plan.changes.push(ProjectChange::AddSubprojectLink {
+                    stem: stem.clone(),
+                });
+            }
+        }
+
+        for line in &project.prj_task.sub_block.lines {
+            let Some(link) = &line.pure_link else {
+                continue;
+            };
+            if !open_subproject_targets.contains(&link.link_name) {
+                plan.changes.push(ProjectChange::RemoveSubprojectLink {
+                    target: link.link_name.clone(),
+                    stem: link.stem.clone(),
+                    line_number: line.line_number,
+                });
+            }
+        }
+
         if let Some(scheduled) = &project.prj_task.scheduled {
             plan.changes.push(ProjectChange::RemoveScheduled {
                 scheduled: scheduled.clone(),
@@ -900,6 +1002,7 @@ fn apply_project_changes(
     changes: &[ProjectChange],
 ) -> Result<String, String> {
     let mut edits = Vec::new();
+    let mut subproject_link_additions = Vec::new();
     for change in changes {
         match change {
             ProjectChange::Status { to, .. } => {
@@ -915,7 +1018,27 @@ fn apply_project_changes(
                 edits
                     .push(remove_prj_inline_field_edit(contents, "scheduled")?);
             }
+            ProjectChange::AddSubprojectLink { stem } => {
+                subproject_link_additions.push(stem.clone());
+            }
+            ProjectChange::RemoveSubprojectLink {
+                target,
+                line_number,
+                ..
+            } => {
+                edits.push(remove_subproject_link_edit(
+                    contents,
+                    *line_number,
+                    target,
+                )?);
+            }
         }
+    }
+    if !subproject_link_additions.is_empty() {
+        edits.push(add_subproject_links_edit(
+            contents,
+            &subproject_link_additions,
+        )?);
     }
 
     edits.sort_by(|left, right| {
@@ -1031,6 +1154,116 @@ fn remove_prj_inline_field_edit(
     }
 
     Err(format!("failed to locate [{key}::...] field on ^prj task"))
+}
+
+fn add_subproject_links_edit(
+    contents: &str,
+    stems: &[String],
+) -> Result<TextEdit, String> {
+    let layout = prj_sub_block_layout(contents)?;
+    let anchor_line_number = layout
+        .sub_block
+        .lines
+        .iter()
+        .filter(|line| line.pure_link.is_some())
+        .map(|line| line.line_number)
+        .last()
+        .unwrap_or(layout.prj_line.line_number);
+    let anchor_line = layout
+        .lines
+        .iter()
+        .find(|line| line.line_number == anchor_line_number)
+        .copied()
+        .ok_or_else(|| {
+            "failed to locate sub-project link insertion point".to_string()
+        })?;
+    let insertion_indent = layout
+        .sub_block
+        .lines
+        .first()
+        .map(|line| line.indentation.clone())
+        .unwrap_or_else(|| format!("{}\t", layout.prj_indent));
+    let ending = line_ending(contents, anchor_line);
+    let anchor_has_ending = anchor_line.next_start > anchor_line.end;
+
+    let mut replacement = String::new();
+    if !anchor_has_ending {
+        replacement.push_str(ending);
+    }
+    for (index, stem) in stems.iter().enumerate() {
+        if index > 0 {
+            replacement.push_str(ending);
+        }
+        replacement.push_str(&format!("{insertion_indent}- [[{stem}]]"));
+    }
+    if anchor_has_ending {
+        replacement.push_str(ending);
+    }
+
+    Ok(TextEdit {
+        start: anchor_line.next_start,
+        end: anchor_line.next_start,
+        replacement,
+    })
+}
+
+fn remove_subproject_link_edit(
+    contents: &str,
+    line_number: usize,
+    target: &str,
+) -> Result<TextEdit, String> {
+    let line = line_spans(contents)
+        .into_iter()
+        .find(|line| line.line_number == line_number)
+        .ok_or_else(|| {
+            "failed to locate sub-project link bullet".to_string()
+        })?;
+    let line_text = trim_cr(&contents[line.start..line.end]);
+    let Some(link) = parse_pure_link_bullet(line_text)
+        .filter(|link| link.link_name == target)
+    else {
+        return Err(
+            "failed to locate matching sub-project link bullet".to_string()
+        );
+    };
+    debug_assert_eq!(link.link_name, target);
+
+    Ok(TextEdit {
+        start: line.start,
+        end: line.next_start,
+        replacement: String::new(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrjSubBlockLayout {
+    lines: Vec<LineSpan>,
+    prj_line: LineSpan,
+    prj_indent: String,
+    sub_block: PrjSubBlock,
+}
+
+fn prj_sub_block_layout(contents: &str) -> Result<PrjSubBlockLayout, String> {
+    let frontmatter = parse_frontmatter(contents)
+        .ok_or_else(|| "failed to locate project frontmatter".to_string())?;
+    let lines = line_spans(contents);
+    for (index, line) in lines.iter().enumerate() {
+        if line.line_number <= frontmatter.body_start_line {
+            continue;
+        }
+        let line_text = trim_cr(&contents[line.start..line.end]);
+        if !has_trailing_prj_anchor(line_text) {
+            continue;
+        }
+        return Ok(PrjSubBlockLayout {
+            lines: lines.clone(),
+            prj_line: *line,
+            prj_indent: leading_whitespace(line_text).to_string(),
+            sub_block: parse_prj_sub_block(contents, &lines, index),
+        });
+    }
+
+    Err("failed to locate ^prj task".to_string())
 }
 
 fn inline_field_removal_range(
@@ -1149,16 +1382,20 @@ fn parse_project(
     let mut open_task_count = 0;
     let mut open_unprioritized_count = 0;
     let mut prj_candidates = Vec::new();
+    let lines = line_spans(contents);
 
-    for (index, line) in contents
-        .lines()
-        .skip(frontmatter.body_start_line)
-        .enumerate()
-    {
-        let line_number = frontmatter.body_start_line + index + 1;
+    for (line_index, line_span) in lines.iter().enumerate() {
+        if line_span.line_number <= frontmatter.body_start_line {
+            continue;
+        }
+        let line = trim_cr(&contents[line_span.start..line_span.end]);
         let has_prj_anchor = has_trailing_prj_anchor(line);
         if has_prj_anchor {
-            prj_candidates.push(PrjCandidate { line_number, line });
+            prj_candidates.push(PrjCandidate {
+                line_number: line_span.line_number,
+                line_index,
+                line,
+            });
         }
 
         let Some(task) = parse_task_line(line) else {
@@ -1174,12 +1411,19 @@ fn parse_project(
         }
     }
 
-    let prj_task = classify_prj_task(relative_path, &prj_candidates, issues);
+    let sub_block = if prj_candidates.len() == 1 {
+        parse_prj_sub_block(contents, &lines, prj_candidates[0].line_index)
+    } else {
+        PrjSubBlock::default()
+    };
+    let prj_task =
+        classify_prj_task(relative_path, &prj_candidates, sub_block, issues);
 
     Some(Project {
         relative_path: relative_path.to_path_buf(),
         name: project_name(relative_path),
         link_name: project_link_name(relative_path),
+        link_stem: project_link_stem(relative_path),
         parent_target,
         status,
         open_task_count,
@@ -1247,23 +1491,107 @@ fn trim_yaml_scalar(value: &str) -> &str {
 }
 
 fn wikilink_target(value: &str) -> Option<String> {
+    wikilink_ref(value).map(|target| target.link_name)
+}
+
+fn wikilink_ref(value: &str) -> Option<WikilinkRef> {
     let value = trim_yaml_scalar(value);
     let inner = value.strip_prefix("[[")?.strip_suffix("]]")?.trim();
+    wikilink_ref_from_inner(inner)
+}
+
+fn wikilink_ref_from_inner(inner: &str) -> Option<WikilinkRef> {
     let before_alias =
         inner.split_once('|').map_or(inner, |(target, _)| target);
     let before_heading = before_alias
         .split_once('#')
         .map_or(before_alias, |(target, _)| target);
-    let name = before_heading.rsplit('/').next()?.trim();
-    if name.is_empty() {
+    let stem = before_heading.rsplit('/').next()?.trim();
+    if stem.is_empty() {
         return None;
     }
-    Some(name.to_ascii_lowercase())
+    Some(WikilinkRef {
+        link_name: stem.to_ascii_lowercase(),
+        stem: stem.to_string(),
+    })
+}
+
+fn wikilink_targets_in_line(line: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut offset = 0;
+    while let Some(open_relative) = line[offset..].find("[[") {
+        let open = offset + open_relative;
+        let Some(close_relative) = line[open + 2..].find("]]") else {
+            break;
+        };
+        let close = open + 2 + close_relative;
+        if let Some(target) = wikilink_ref_from_inner(&line[open + 2..close]) {
+            targets.push(target.link_name);
+        }
+        offset = close + 2;
+    }
+    targets
+}
+
+fn parse_prj_sub_block(
+    contents: &str,
+    lines: &[LineSpan],
+    prj_line_index: usize,
+) -> PrjSubBlock {
+    let prj_line = lines[prj_line_index];
+    let prj_text = trim_cr(&contents[prj_line.start..prj_line.end]);
+    let prj_indent = leading_whitespace(prj_text);
+    let mut block = PrjSubBlock::default();
+
+    for line in lines.iter().skip(prj_line_index + 1) {
+        let line_text = trim_cr(&contents[line.start..line.end]);
+        if line_text.trim().is_empty() {
+            break;
+        }
+        let indentation = leading_whitespace(line_text);
+        if indentation.len() <= prj_indent.len()
+            || !indentation.starts_with(prj_indent)
+        {
+            break;
+        }
+        block.lines.push(PrjSubBlockLine {
+            line_number: line.line_number,
+            indentation: indentation.to_string(),
+            pure_link: parse_pure_link_bullet(line_text),
+            wikilink_targets: wikilink_targets_in_line(line_text),
+        });
+    }
+
+    block
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    let end = line
+        .char_indices()
+        .find_map(|(index, character)| {
+            (!character.is_whitespace()).then_some(index)
+        })
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+fn parse_pure_link_bullet(line: &str) -> Option<WikilinkRef> {
+    let trimmed = line.trim_start();
+    let bullet = trimmed.chars().next()?;
+    if !matches!(bullet, '-' | '*' | '+') {
+        return None;
+    }
+    let after_bullet = &trimmed[bullet.len_utf8()..];
+    if !after_bullet.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    wikilink_ref(after_bullet.trim())
 }
 
 fn classify_prj_task(
     relative_path: &Path,
     candidates: &[PrjCandidate<'_>],
+    sub_block: PrjSubBlock,
     issues: &mut Vec<ScanIssue>,
 ) -> PrjTask {
     if candidates.is_empty() {
@@ -1301,6 +1629,7 @@ fn classify_prj_task(
         priority: inline_field_value(task.text, "p"),
         description,
         placeholder,
+        sub_block,
     }
 }
 
@@ -1788,9 +2117,13 @@ fn project_name(relative_path: &Path) -> String {
 }
 
 fn project_link_name(relative_path: &Path) -> String {
+    project_link_stem(relative_path).to_ascii_lowercase()
+}
+
+fn project_link_stem(relative_path: &Path) -> String {
     relative_path
         .file_stem()
-        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_default()
 }
 
@@ -1918,6 +2251,7 @@ status: wip
         assert_eq!(project.prj_task.priority.as_deref(), Some("2"));
         assert_eq!(project.prj_task.description, "Finish the project");
         assert_eq!(project.link_name, "alpha");
+        assert_eq!(project.link_stem, "Alpha");
     }
 
     #[test]
@@ -2023,6 +2357,49 @@ status: wip
     }
 
     #[test]
+    fn project_parser_records_prj_sub_block_link_bullets() {
+        let project = parse_clean_project(
+            "Parent.md",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n\t- [[BareChild]]\n\t- [[Projects/AliasChild|Child alias]]\n\t- [[Projects/HeadingChild#Next]]\n\t- [[MentionedChild]] kickoff notes\n\t- prose with [[InlineOnly]] link\n",
+        );
+
+        let lines = &project.prj_task.sub_block.lines;
+        assert_eq!(lines.len(), 5);
+        assert_eq!(project.open_task_count, 1);
+        assert_eq!(project.open_unprioritized_count, 0);
+        assert_eq!(lines[0].indentation, "\t");
+        assert_eq!(
+            lines
+                .iter()
+                .filter_map(|line| line.pure_link.as_ref())
+                .map(|link| (link.link_name.as_str(), link.stem.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("barechild", "BareChild"),
+                ("aliaschild", "AliasChild"),
+                ("headingchild", "HeadingChild"),
+            ]
+        );
+        assert_eq!(
+            lines[3].wikilink_targets,
+            vec!["mentionedchild".to_string()]
+        );
+        assert!(lines[3].pure_link.is_none());
+        assert_eq!(lines[4].wikilink_targets, vec!["inlineonly".to_string()]);
+        assert!(lines[4].pure_link.is_none());
+    }
+
+    #[test]
+    fn project_parser_stops_prj_sub_block_at_blank_line() {
+        let project = parse_clean_project(
+            "Parent.md",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n\n\t- [[NotInBlock]]\n",
+        );
+
+        assert!(project.prj_task.sub_block.lines.is_empty());
+    }
+
+    #[test]
     fn project_sync_plan_flips_status_without_prj_edits_after_effective_status()
     {
         let contents = "---\ntype: [[project]]\nstatus: wip\n---\n- [x] #task Ship [p::2] ^prj\n";
@@ -2030,7 +2407,7 @@ status: wip
         let project =
             parse_project(Path::new("Alpha.md"), contents, &mut issues)
                 .expect("project");
-        let plan = plan_project_sync(&project, false);
+        let plan = plan_project_sync(&project, &[]);
 
         assert!(issues.is_empty());
         assert_eq!(
@@ -2053,7 +2430,7 @@ status: wip
         )
         .expect("project");
         assert_eq!(
-            plan_project_sync(&stalled, false).changes,
+            plan_project_sync(&stalled, &[]).changes,
             vec![ProjectChange::RemovePriority {
                 priority: "2".to_string(),
             }]
@@ -2067,7 +2444,7 @@ status: wip
         )
         .expect("project");
         assert_eq!(
-            plan_project_sync(&has_unprioritized, false).changes,
+            plan_project_sync(&has_unprioritized, &[]).changes,
             vec![ProjectChange::AddPriority {
                 reason: AddPriorityReason::UnprioritizedOpenTasks,
             }]
@@ -2082,7 +2459,7 @@ status: wip
         .expect("project");
         assert_eq!(explicit_p0_is_hidden.open_unprioritized_count, 0);
         assert_eq!(
-            plan_project_sync(&explicit_p0_is_hidden, false).changes,
+            plan_project_sync(&explicit_p0_is_hidden, &[]).changes,
             vec![ProjectChange::RemovePriority {
                 priority: "2".to_string(),
             }]
@@ -2093,21 +2470,24 @@ status: wip
 
     #[test]
     fn project_sync_plan_manages_prj_priority_from_open_subprojects() {
+        let child_stems = [String::from("Child")];
         let hidden_parent = parse_clean_project(
             "HiddenParent.md",
-            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n\t- [[Child]]\n",
         );
         assert!(
-            plan_project_sync(&hidden_parent, true).changes.is_empty(),
+            plan_project_sync(&hidden_parent, &child_stems)
+                .changes
+                .is_empty(),
             "existing priority should be kept while open sub-projects exist"
         );
 
         let missing_priority = parse_clean_project(
             "MissingPriorityParent.md",
-            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent ^prj\n",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent ^prj\n\t- [[Child]]\n",
         );
         assert_eq!(
-            plan_project_sync(&missing_priority, true).changes,
+            plan_project_sync(&missing_priority, &child_stems).changes,
             vec![ProjectChange::AddPriority {
                 reason: AddPriorityReason::OpenSubprojects,
             }]
@@ -2118,11 +2498,76 @@ status: wip
             "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n",
         );
         assert_eq!(
-            plan_project_sync(&surfacing_parent, false).changes,
+            plan_project_sync(&surfacing_parent, &[]).changes,
             vec![ProjectChange::RemovePriority {
                 priority: "2".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn project_sync_plan_reconciles_subproject_link_bullets() {
+        let project = parse_clean_project(
+            "Parent.md",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n\t- [[ExistingChild]]\n\t- [[stale_child]]\n\t- [[MentionedChild]] kickoff notes\n\t- prose with [[ManualOnly]] link\n",
+        );
+        let children = [
+            String::from("AnotherChild"),
+            String::from("ExistingChild"),
+            String::from("MentionedChild"),
+        ];
+
+        assert_eq!(
+            plan_project_sync(&project, &children).changes,
+            vec![
+                ProjectChange::AddSubprojectLink {
+                    stem: "AnotherChild".to_string(),
+                },
+                ProjectChange::RemoveSubprojectLink {
+                    target: "stale_child".to_string(),
+                    stem: "stale_child".to_string(),
+                    line_number: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn project_sync_plan_matches_subproject_links_case_insensitively() {
+        let project = parse_clean_project(
+            "Parent.md",
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship parent [p::2] ^prj\n\t- [[Child]]\n",
+        );
+        let children = [String::from("child")];
+
+        assert!(plan_project_sync(&project, &children).changes.is_empty());
+    }
+
+    #[test]
+    fn project_sync_plan_skips_subproject_links_without_open_prj_edits() {
+        let missing = parse_clean_project(
+            "Missing.md",
+            "---\ntype: [[project]]\n---\n- [ ] #task Needs completion task\n",
+        );
+        let checked = parse_clean_project(
+            "Checked.md",
+            "---\ntype: [[project]]\n---\n- [x] #task Ship checked [p::2] ^prj\n\t- [[OldChild]]\n",
+        );
+        let terminal = parse_clean_project(
+            "Terminal.md",
+            "---\ntype: [[project]]\nstatus: done\n---\n- [ ] #task Ship terminal [p::2] ^prj\n\t- [[OldChild]]\n",
+        );
+        let children = [String::from("Child")];
+
+        for project in [&missing, &checked, &terminal] {
+            assert!(!plan_project_sync(project, &children).changes.iter().any(
+                |change| matches!(
+                    change,
+                    ProjectChange::AddSubprojectLink { .. }
+                        | ProjectChange::RemoveSubprojectLink { .. }
+                )
+            ));
+        }
     }
 
     #[test]
@@ -2179,25 +2624,37 @@ status: wip
         .expect("multiple project");
         assert_eq!(issues.len(), 2);
 
-        let parent_links = open_subproject_parent_link_names([
-            &open_child,
-            &path_case_child,
-            &terminal_status_open_child,
-            &checked_child,
-            &canceled_child,
-            &missing_prj_child,
-            &malformed_child,
-            &multiple_child,
-            &self_link,
-            &area_child,
-        ]);
+        let children_by_parent =
+            open_subproject_children_by_parent_link_name([
+                &open_child,
+                &path_case_child,
+                &terminal_status_open_child,
+                &checked_child,
+                &canceled_child,
+                &missing_prj_child,
+                &malformed_child,
+                &multiple_child,
+                &self_link,
+                &area_child,
+            ]);
 
-        assert!(parent_links.contains(&parent.link_name));
-        assert!(parent_links.contains("area"));
-        assert!(!parent_links.contains(&self_link.link_name));
+        assert_eq!(
+            children_by_parent.get(&parent.link_name),
+            Some(&vec![
+                "OpenChild".to_string(),
+                "PathCaseChild".to_string(),
+                "TerminalStatusOpenChild".to_string(),
+            ])
+        );
+        assert_eq!(
+            children_by_parent.get("area"),
+            Some(&vec!["AreaChild".to_string()])
+        );
+        assert!(!children_by_parent.contains_key(&self_link.link_name));
 
-        let non_parent_links = open_subproject_parent_link_names([&area_child]);
-        assert!(!non_parent_links.contains(&parent.link_name));
+        let non_parent_links =
+            open_subproject_children_by_parent_link_name([&area_child]);
+        assert!(!non_parent_links.contains_key(&parent.link_name));
     }
 
     #[test]
@@ -2209,9 +2666,7 @@ status: wip
             &mut issues,
         )
         .expect("project");
-        assert!(plan_project_sync(&already_on_dash, false)
-            .changes
-            .is_empty());
+        assert!(plan_project_sync(&already_on_dash, &[]).changes.is_empty());
 
         issues.clear();
         let already_hidden = parse_project(
@@ -2220,7 +2675,7 @@ status: wip
             &mut issues,
         )
         .expect("project");
-        assert!(plan_project_sync(&already_hidden, false).changes.is_empty());
+        assert!(plan_project_sync(&already_hidden, &[]).changes.is_empty());
         assert!(issues.is_empty());
     }
 
@@ -2236,7 +2691,7 @@ status: wip
 
         assert!(issues.is_empty());
         assert_eq!(
-            plan_project_sync(&project, false).changes,
+            plan_project_sync(&project, &[]).changes,
             vec![
                 ProjectChange::RemovePriority {
                     priority: "2".to_string(),
@@ -2257,7 +2712,7 @@ status: wip
         let project =
             parse_project(Path::new("Alpha.md"), &contents, &mut issues)
                 .expect("project");
-        let plan = plan_project_sync(&project, false);
+        let plan = plan_project_sync(&project, &[]);
 
         assert!(issues.is_empty());
         assert!(plan.changes.is_empty());
@@ -2357,6 +2812,88 @@ status: wip
         assert_eq!(
             output,
             "---\r\ntype: [[project]]\r\nstatus: done\r\n---\r\n- [x] #task Ship [p::2] ^prj\r\n"
+        );
+    }
+
+    #[test]
+    fn project_changes_insert_subproject_links_after_prj_with_tab_indent() {
+        let output = apply_project_changes(
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n## Tasks\n",
+            &[ProjectChange::AddSubprojectLink {
+                stem: "Child".to_string(),
+            }],
+        )
+        .expect("add sub-project link");
+
+        assert_eq!(
+            output,
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n\t- [[Child]]\n## Tasks\n"
+        );
+    }
+
+    #[test]
+    fn project_changes_insert_subproject_links_after_existing_links() {
+        let output = apply_project_changes(
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n  - [[Alpha]]\n  - prose notes\n",
+            &[ProjectChange::AddSubprojectLink {
+                stem: "Beta".to_string(),
+            }],
+        )
+        .expect("add sub-project link");
+
+        assert_eq!(
+            output,
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n  - [[Alpha]]\n  - [[Beta]]\n  - prose notes\n"
+        );
+    }
+
+    #[test]
+    fn project_changes_remove_middle_subproject_link_bullet() {
+        let output = apply_project_changes(
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n\t- [[Alpha]]\n\t- [[OldChild]]\n\t- [[Omega]]\n",
+            &[ProjectChange::RemoveSubprojectLink {
+                target: "oldchild".to_string(),
+                stem: "OldChild".to_string(),
+                line_number: 6,
+            }],
+        )
+        .expect("remove sub-project link");
+
+        assert_eq!(
+            output,
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n\t- [[Alpha]]\n\t- [[Omega]]\n"
+        );
+    }
+
+    #[test]
+    fn project_changes_preserve_crlf_for_subproject_link_insertions() {
+        let output = apply_project_changes(
+            "---\r\ntype: [[project]]\r\n---\r\n- [ ] #task Ship [p::2] ^prj\r\n## Tasks\r\n",
+            &[ProjectChange::AddSubprojectLink {
+                stem: "Child".to_string(),
+            }],
+        )
+        .expect("add sub-project link");
+
+        assert_eq!(
+            output,
+            "---\r\ntype: [[project]]\r\n---\r\n- [ ] #task Ship [p::2] ^prj\r\n\t- [[Child]]\r\n## Tasks\r\n"
+        );
+    }
+
+    #[test]
+    fn project_changes_insert_subproject_links_after_final_prj_line() {
+        let output = apply_project_changes(
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj",
+            &[ProjectChange::AddSubprojectLink {
+                stem: "Child".to_string(),
+            }],
+        )
+        .expect("add sub-project link");
+
+        assert_eq!(
+            output,
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship [p::2] ^prj\n\t- [[Child]]"
         );
     }
 }
