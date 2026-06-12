@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-12 10:25:26
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_project_from_task_block_id.md
 ---
 # Obsidian Project-From-Task: Block-ID-Derived Filename + Block-Link Rewriting
