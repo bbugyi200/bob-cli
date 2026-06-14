@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-14 07:33:59
-status: wip
+status: done
 prompt: sdd/prompts/202606/fix_project_block_link_syntax.md
 ---
 # Fix Project Block Link Syntax
