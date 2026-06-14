@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-14 08:42:25
-status: wip
+status: done
 prompt: sdd/prompts/202606/convert_sase_project_1.md
 ---
 # Plan: Convert `~/bob/sase.md` Into a Bob Project File
