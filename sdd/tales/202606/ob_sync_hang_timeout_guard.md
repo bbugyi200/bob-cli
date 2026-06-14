@@ -1,6 +1,6 @@
 ---
 title: Stop ob-sync-bob from stalling when a single `ob sync` hangs
-status: proposed
+status: done
 date: 2026-06-14
 create_time: 2026-06-14 07:24:41
 prompt: sdd/prompts/202606/ob_sync_hang_timeout_guard.md
@@ -113,6 +113,31 @@ noting the wrapper now bounds each attempt.
   default.
 - A controlled vault edit is picked up by a later cycle without any manual restart.
 - No unrelated files in `/home/bryan/bob` or the bob-cli workspace are modified.
+
+## Implementation Result
+
+Implemented on 2026-06-14 in `/home/bryan/.local/bin/ob-sync-bob-poll`:
+
+- Added validated `OB_SYNC_TIMEOUT_SECONDS` and `OB_SYNC_KILL_AFTER_SECONDS` settings, defaulting to 120s and 15s.
+- Wrapped each one-shot `ob sync --path /home/bryan/bob` in GNU `timeout --signal=TERM --kill-after=...`.
+- Added explicit timeout logging for exit status 124 while preserving retry-loop behavior.
+- Left `/home/bryan/.config/systemd/user/ob-sync-bob.service` unchanged.
+
+Validation performed:
+
+- `bash -n /home/bryan/.local/bin/ob-sync-bob-poll`
+- `shellcheck /home/bryan/.local/bin/ob-sync-bob-poll`
+- Synthetic timeout test using an exported fake Bash `timeout` function returning 124; the wrapper logged timeout retries
+  and continued polling.
+- `systemctl --user restart ob-sync-bob.service`
+- `systemctl --user status ob-sync-bob.service --no-pager`
+- `journalctl --user -u ob-sync-bob.service -n 80 --no-pager`
+
+Observed result: the restarted service logged `interval=30s timeout=120s kill_after=15s`, completed a real one-shot sync,
+logged `Sync cycle finished`, and returned to its 30s sleep.
+
+Post-run `git -C /home/bryan/bob status --short` showed synced vault changes in daily/core notes and one new prompt note;
+those vault files were not manually edited as part of this implementation and were left untouched.
 
 ## Rejected alternatives
 
