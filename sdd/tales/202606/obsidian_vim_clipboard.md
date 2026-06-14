@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-14 09:59:06
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_vim_clipboard.md
 ---
 # Obsidian Vim Operator Clipboard Plan
