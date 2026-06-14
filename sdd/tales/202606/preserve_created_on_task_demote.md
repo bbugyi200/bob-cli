@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-14 10:58:10
-status: proposed
+status: done
 prompt: sdd/prompts/202606/preserve_created_on_task_demote.md
 ---
 
