@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-15 07:47:21
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_alt_o_below_keymap_fix_1.md
 ---
 # Fix Plain Option+o Child-Bullet Keymap in Obsidian
