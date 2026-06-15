@@ -59,6 +59,7 @@ const MANAGED_BODY_END: &str = "<!-- highlights:end -->";
 const PDF_TASK_BLOCK_ID: &str = "^ref";
 const PDF_TASK_HIDE_TAG: &str = "#hide";
 const PDF_TASK_TAG: &str = "#task";
+const PDF_TASK_KIND_TAG: &str = "#ref";
 const HIGHLIGHT_TASK_FIELD: &str = "h";
 const LEGACY_HIGHLIGHT_TASK_FIELD: &str = "highlight_task";
 const HIGHLIGHT_TASK_ID_VERSION: &str = "v1";
@@ -4521,7 +4522,7 @@ fn parse_pdf_task_line(body: &str) -> Result<PdfTaskLineState> {
 
 fn malformed_pdf_task_line_error(line_index: usize) -> CommandError {
     CommandError::new(format!(
-        "generated PDF task line on line {} is malformed; expected a generated task such as '- [ ] #task [[...pdf]] #hide ^ref', '- [x] #task [[...pdf]] #hide ^ref', or '- [-] #task [[...pdf]] #hide ^ref'; legacy generated lines with [p::2] or without #hide are still accepted",
+        "generated PDF task line on line {} is malformed; expected a generated task such as '- [ ] #task #ref [[...pdf]] #hide ^ref', '- [x] #task #ref [[...pdf]] #hide ^ref', or '- [-] #task #ref [[...pdf]] #hide ^ref'; legacy generated lines without #ref, with [p::2], or without #hide are still accepted",
         line_index + 1
     ))
 }
@@ -5558,7 +5559,11 @@ fn default_note_body(
     body.push_str("\n\n");
     body.push_str("- [");
     body.push(projection_pdf_task_mark(projection));
-    body.push_str("] #task [[");
+    body.push_str("] ");
+    body.push_str(PDF_TASK_TAG);
+    body.push(' ');
+    body.push_str(PDF_TASK_KIND_TAG);
+    body.push_str(" [[");
     body.push_str(source_pdf);
     body.push_str("]] ");
     body.push_str(PDF_TASK_HIDE_TAG);
@@ -7263,6 +7268,18 @@ Body
         .expect("parse legacy task without hide tag");
         match legacy_without_marker {
             super::PdfTaskLineState::Present(task) => assert!(!task.checked),
+            super::PdfTaskLineState::Missing => panic!("expected task line"),
+        }
+
+        let typed = super::parse_pdf_task_line(
+            "- [ ] #task #ref [[lib/books/example.pdf]] #hide ^ref\n",
+        )
+        .expect("parse typed task with #ref");
+        match typed {
+            super::PdfTaskLineState::Present(task) => {
+                assert!(!task.checked);
+                assert_eq!(task.status(), super::PdfTaskStatus::Unchecked);
+            }
             super::PdfTaskLineState::Missing => panic!("expected task line"),
         }
     }

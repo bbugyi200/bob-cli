@@ -18,8 +18,10 @@ use super::{
 const COMMAND_NAME: &str = "bob projects";
 const PLACEHOLDER_CRITERIA: &str =
     "<short_project_completion_criteria_goes_here>";
-const PROJECT_TASK_SHAPE: &str = "- [ ] #task <completion criteria> #hide ^prj";
+const PROJECT_TASK_SHAPE: &str =
+    "- [ ] #task #prj <completion criteria> #hide ^prj";
 const HIDE_TAG: &str = "#hide";
+const PROJECT_TASK_TAG: &str = "#prj";
 const SUBPROJECTS_MARKER_PREFIX: &str = "🧩 **Sub-projects:**";
 const SUBPROJECTS_SEPARATOR: &str = "•";
 const SUBPROJECT_DONE_MARKER: &str = "✅";
@@ -2084,7 +2086,11 @@ fn task_description(text: &str) -> String {
     let without_fields = remove_inline_fields(without_anchor);
     without_fields
         .split_whitespace()
-        .filter(|token| *token != "#task" && *token != HIDE_TAG)
+        .filter(|token| {
+            *token != "#task"
+                && *token != PROJECT_TASK_TAG
+                && *token != HIDE_TAG
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -2525,7 +2531,7 @@ mod tests {
 type: "[[project]]"
 status: wip
 ---
-- [ ] #task Finish the project #hide ^prj
+- [ ] #task #prj Finish the project #hide ^prj
 - [ ] #task shown one
 - [/] #task shown in progress
 - [B] #task shown blocked
@@ -2549,6 +2555,32 @@ status: wip
         assert_eq!(project.prj_task.description, "Finish the project");
         assert_eq!(project.link_name, "alpha");
         assert_eq!(project.link_stem, "Alpha");
+    }
+
+    #[test]
+    fn project_parser_accepts_prj_tag_and_strips_it_from_description() {
+        let mut issues = Vec::new();
+        let tagged = parse_project(
+            Path::new("Tagged.md"),
+            "---\ntype: [[project]]\n---\n- [ ] #task #prj Ship the outcome #hide ^prj\n",
+            &mut issues,
+        )
+        .expect("project note");
+        assert!(issues.is_empty());
+        assert_eq!(tagged.prj_task.state, PrjTaskState::Open);
+        assert!(tagged.prj_task.hidden);
+        assert_eq!(tagged.prj_task.description, "Ship the outcome");
+
+        // Legacy lines without #prj remain valid and parse identically.
+        let legacy = parse_project(
+            Path::new("Legacy.md"),
+            "---\ntype: [[project]]\n---\n- [ ] #task Ship the outcome #hide ^prj\n",
+            &mut issues,
+        )
+        .expect("project note");
+        assert!(issues.is_empty());
+        assert_eq!(legacy.prj_task.state, PrjTaskState::Open);
+        assert_eq!(legacy.prj_task.description, "Ship the outcome");
     }
 
     #[test]

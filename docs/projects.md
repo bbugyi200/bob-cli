@@ -41,11 +41,14 @@ wikilink, such as `parent: "[[Parent Project]]"`.
 Each active project should contain one task line like:
 
 ```markdown
-- [ ] #task Ship the project outcome! #hide ^prj
+- [ ] #task #prj Ship the project outcome! #hide ^prj
 ```
 
-The trailing block id must be exactly `^prj`. Multiple `^prj` tasks or a `^prj`
-line that is not a valid `#task` checkbox are per-file errors.
+The trailing block id must be exactly `^prj`. The `#prj` tag immediately after
+`#task` marks this as the machine-managed project lifecycle task so Obsidian
+task views can tell it apart from ordinary follow-up tasks; it is additive, and
+legacy lines without `#prj` are still recognized. Multiple `^prj` tasks or a
+`^prj` line that is not a valid `#task` checkbox are per-file errors.
 
 Task statuses follow the Tasks plugin convention:
 
@@ -155,7 +158,7 @@ Typical action output:
   ok athena     updated [[old_plan]] on ^prj  sub-project canceled
   ok athena     removed [[old_child]] from ^prj  no longer a sub-project
   ok athena     updated sub-projects on ^prj  canonical format
-  warning outlive  active project has no ^prj task  add `- [ ] #task <completion criteria> #hide ^prj`
+  warning outlive  active project has no ^prj task  add `- [ ] #task #prj <completion criteria> #hide ^prj`
 
 11 projects - 1 status updated - 7 ^prj edited - 1 warnings
 ```

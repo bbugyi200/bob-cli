@@ -2633,7 +2633,7 @@ fn highlights_ref_sync_creates_note_frontmatter_from_marker_pdf_note() {
     );
     assert!(
         contents.contains(
-            "- [ ] #task [[lib/systems-performance.pdf]] #hide ^ref\n"
+            "- [ ] #task #ref [[lib/systems-performance.pdf]] #hide ^ref\n"
         ),
         "{contents}"
     );
@@ -3925,7 +3925,7 @@ fn highlights_ref_marker_edit_updates_frontmatter() {
     let contents = fs::read_to_string(&note).expect("read updated ref note");
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
-        contents.contains("- [x] #task [[lib/example.pdf]] #hide ^ref\n"),
+        contents.contains("- [x] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
         "{contents}"
     );
 }
@@ -4193,7 +4193,8 @@ fn highlights_ref_deprecated_done_status_migrates_to_read_with_pdf_write() {
     let migrated_note = fs::read_to_string(&note).expect("read migrated note");
     assert!(migrated_note.contains("status: read\n"), "{migrated_note}");
     assert!(
-        migrated_note.contains("- [x] #task [[lib/example.pdf]] #hide ^ref\n"),
+        migrated_note
+            .contains("- [x] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
         "{migrated_note}"
     );
     assert!(
@@ -4238,7 +4239,7 @@ fn highlights_ref_task_cancelled_dry_run_requires_and_writes_pdf_marker() {
 
     let generated_note = fs::read_to_string(&note).expect("read ref note");
     let cancelled_note = generated_note.replace(
-        "- [ ] #task [[lib/example.pdf]] #hide ^ref",
+        "- [ ] #task #ref [[lib/example.pdf]] #hide ^ref",
         "- [-] #task [[lib/example.pdf]] [p::2] [cancelled:: 2026-06-04] ^ref",
     );
     write_file(&note, &cancelled_note);
@@ -4442,7 +4443,7 @@ fn highlights_ref_task_cancelled_scan_write_pdfs_writes_pdf_marker() {
     );
     assert!(
         note_after_write
-            .contains("- [-] #task [[lib/example.pdf]] #hide ^ref\n"),
+            .contains("- [-] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
         "{note_after_write}"
     );
 }
@@ -4627,7 +4628,7 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
     );
     assert!(
         note_after_write
-            .contains("- [x] #task [[lib/example.pdf]] #hide ^ref\n"),
+            .contains("- [x] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
         "{note_after_write}"
     );
     assert!(
@@ -4697,8 +4698,8 @@ Note: marker note mirrored from the PDF
     );
     let checked_note =
         fs::read_to_string(&note).expect("read ref note").replace(
-            "- [ ] #task [[lib/books/closing-order.pdf]]",
-            "- [x] #task [[lib/books/closing-order.pdf]]",
+            "- [ ] #task #ref [[lib/books/closing-order.pdf]]",
+            "- [x] #task #ref [[lib/books/closing-order.pdf]]",
         );
     write_file(&note, &checked_note);
 
@@ -4727,7 +4728,7 @@ Note: marker note mirrored from the PDF
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
         contents.contains(
-            "- [x] #task [[lib/books/closing-order.pdf]] #hide ^ref\n"
+            "- [x] #task #ref [[lib/books/closing-order.pdf]] #hide ^ref\n"
         ),
         "{contents}"
     );
@@ -4839,8 +4840,8 @@ Note: marker note mirrored from the PDF
     let checked_note = fs::read_to_string(&note)
         .expect("read scan ref note")
         .replace(
-            "- [ ] #task [[lib/books/scan-closing.pdf]]",
-            "- [x] #task [[lib/books/scan-closing.pdf]]",
+            "- [ ] #task #ref [[lib/books/scan-closing.pdf]]",
+            "- [x] #task #ref [[lib/books/scan-closing.pdf]]",
         );
     write_file(&note, &checked_note);
 
@@ -4895,7 +4896,7 @@ Note: marker note mirrored from the PDF
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
         contents.contains(
-            "- [x] #task [[lib/books/scan-closing.pdf]] #hide ^ref\n"
+            "- [x] #task #ref [[lib/books/scan-closing.pdf]] #hide ^ref\n"
         ),
         "{contents}"
     );
@@ -4953,7 +4954,7 @@ fn highlights_ref_task_checked_dirty_tracked_note_is_allowed() {
     let contents = fs::read_to_string(&note).expect("read synced note");
     assert!(contents.contains("status: read\n"), "{contents}");
     assert!(
-        contents.contains("- [x] #task [[lib/example.pdf]] #hide ^ref\n"),
+        contents.contains("- [x] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
         "{contents}"
     );
 }
@@ -5141,7 +5142,8 @@ fn highlights_ref_status_abandoned_rewrites_generated_task_to_cancelled() {
         let contents = fs::read_to_string(&note).expect("read synced note");
         assert!(contents.contains("status: abandoned\n"), "{contents}");
         assert!(
-            contents.contains("- [-] #task [[lib/example.pdf]] #hide ^ref\n"),
+            contents
+                .contains("- [-] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
             "{contents}"
         );
     }
@@ -5460,7 +5462,7 @@ Note: Keep a standalone observation after the marker.
     assert!(contents.contains("# Systems Performance\n"), "{contents}");
     assert!(
         contents.contains(
-            "- [ ] #task [[lib/books/systems-performance.pdf]] #hide ^ref\n"
+            "- [ ] #task #ref [[lib/books/systems-performance.pdf]] #hide ^ref\n"
         ),
         "{contents}"
     );
@@ -5849,8 +5851,9 @@ Note:
 
     // The generated PDF reading-status task line is unchanged.
     assert!(
-        contents
-            .contains("- [ ] #task [[lib/books/task-notes.pdf]] #hide ^ref\n"),
+        contents.contains(
+            "- [ ] #task #ref [[lib/books/task-notes.pdf]] #hide ^ref\n"
+        ),
         "{contents}"
     );
 

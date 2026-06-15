@@ -519,10 +519,14 @@ regenerated with the callout format.
 The generated task line is a completion affordance:
 
 ```md
-- [ ] #task [[lib/books/example.pdf]] #hide ^ref
+- [ ] #task #ref [[lib/books/example.pdf]] #hide ^ref
 ```
 
-Checking it with `[x]` or `[X]` means `status: read`. Cancelling it with `[-]`
+The `#ref` tag immediately after `#task` marks this as the machine-managed
+reference lifecycle task so Obsidian task views can tell it apart from ordinary
+annotation-derived follow-up tasks. It is additive: legacy generated lines
+without `#ref` are still recognized. Checking it with `[x]` or `[X]` means
+`status: read`. Cancelling it with `[-]`
 means `status: abandoned` and may keep metadata such as
 `[cancelled:: 2026-06-04]`. Unchecking it does not infer a replacement status.
 When the final synced status is `read`, `sync` checks the generated task line;
