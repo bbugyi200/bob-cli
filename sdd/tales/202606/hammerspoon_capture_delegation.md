@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-15 16:50:29
-status: wip
+status: done
 prompt: sdd/prompts/202606/hammerspoon_capture_delegation.md
 ---
 # Plan: Delegate Hammerspoon Task Capture to `bob capture`
