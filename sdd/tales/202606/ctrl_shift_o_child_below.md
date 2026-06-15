@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-15 08:22:50
-status: wip
+status: done
 prompt: sdd/prompts/202606/ctrl_shift_o_child_below.md
 ---
 # Change Child-Bullet Trigger From Alt+Shift+o To Ctrl+Shift+o
