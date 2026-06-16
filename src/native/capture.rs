@@ -17,7 +17,7 @@ use serde_json::json;
 use super::{env as bob_env, style::Styler};
 
 const COMMAND_NAME: &str = "bob capture";
-const INBOX_FILE: &str = "mac_inbox.md";
+pub(crate) const INBOX_FILE: &str = "mac_inbox.md";
 
 pub(crate) fn run(args: Vec<OsString>) -> i32 {
     let mut command = build_cli();
@@ -237,7 +237,11 @@ fn relative_target(route: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(INBOX_FILE))
 }
 
-fn route_label(route: &str) -> String {
+pub(crate) fn inbox_route() -> &'static str {
+    INBOX_FILE.strip_suffix(".md").unwrap_or(INBOX_FILE)
+}
+
+pub(crate) fn route_label(route: &str) -> String {
     format!("{route}.md")
 }
 
@@ -385,7 +389,7 @@ fn normalize_forced_route(route: &str) -> Result<String, CaptureError> {
     ))
 }
 
-fn is_route_token(value: &str) -> bool {
+pub(crate) fn is_route_token(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')

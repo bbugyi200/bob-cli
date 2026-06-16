@@ -138,6 +138,30 @@ fn capture_help_is_native_only() {
 }
 
 #[test]
+fn capture_targets_help_is_native_only() {
+    let temp = TempDir::new("bob-cli-capture-targets-native-help");
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("--help")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env("XDG_CACHE_HOME", temp.path())
+        .output()
+        .expect("run native-only bob capture-targets --help");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("bob capture-targets"),
+        "expected capture-targets help text:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !temp.path().join("bob-cli/scripts").exists(),
+        "native-only capture-targets should not extract script assets"
+    );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
 fn dataview_help_is_native_only() {
     let temp = TempDir::new("bob-cli-dataview-native-help");
     let output = bob_command()
@@ -243,6 +267,7 @@ fn all_top_level_subcommand_help_is_safe_and_plain() {
     let cases: &[(&[&str], &str)] = &[
         (&["bulk-git-commit", "--help"], "usage: bob bulk-git-commit"),
         (&["capture", "--help"], "bob capture"),
+        (&["capture-targets", "--help"], "bob capture-targets"),
         (&["dataview", "--help"], "bob dataview"),
         (&["highlights", "--help"], "Usage: bob highlights"),
         (&["move-done-tasks", "--help"], "usage: bob move-done-tasks"),
@@ -276,6 +301,7 @@ fn public_help_surfaces_do_not_list_long_only_options() {
         (&["--help"], "bob --help"),
         (&["bulk-git-commit", "--help"], "bob bulk-git-commit --help"),
         (&["capture", "--help"], "bob capture --help"),
+        (&["capture-targets", "--help"], "bob capture-targets --help"),
         (&["dataview", "--help"], "bob dataview --help"),
         (&["highlights", "--help"], "bob highlights --help"),
         (
@@ -523,6 +549,24 @@ fn capture_help_lists_options_alphabetically() {
             "-r, --route",
         ],
     );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
+fn capture_targets_help_lists_options_alphabetically() {
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("--help")
+        .output()
+        .expect("run bob capture-targets --help");
+
+    assert_success(&output);
+    let help = stdout(&output);
+    assert!(
+        help.contains("always pins mac_inbox first as the default"),
+        "expected capture-targets long help:\n{help}"
+    );
+    assert_text_order(&help, &["-b, --bob-dir", "-f, --format", "-h, --help"]);
     assert_stdout_has_no_ansi(&output);
 }
 
@@ -822,6 +866,198 @@ fn capture_json_failure_prints_error_object() {
         json["error"]
             .as_str()
             .is_some_and(|error| error.contains("create target")),
+        "unexpected json failure object: {json}"
+    );
+}
+
+#[test]
+fn capture_targets_json_lists_picker_targets_in_order() {
+    let temp = TempDir::new("bob-cli-capture-targets-json");
+    let vault = temp.path().join("vault");
+
+    write_file(&vault.join("mac_inbox.md"), "---\ntype: [[area]]\n---\n");
+    write_file(&vault.join("dev.md"), "---\ntype: \"[[area]]\"\n---\n");
+    write_file(&vault.join("cash.md"), "---\ntype: [[area]]\n---\n");
+    write_file(
+        &vault.join("bob.md"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n",
+    );
+    write_file(
+        &vault.join("sase.md"),
+        "---\ntype: [[project]]\nstatus: waiting\n---\n",
+    );
+    write_file(
+        &vault.join("odd.md"),
+        "---\ntype: [[project]]\nstatus: blocked\n---\n",
+    );
+    write_file(
+        &vault.join("done.md"),
+        "---\ntype: [[project]]\nstatus: done\n---\n",
+    );
+    write_file(
+        &vault.join("canceled.md"),
+        "---\ntype: [[project]]\nstatus: canceled\n---\n",
+    );
+    write_file(&vault.join("ref.md"), "---\ntype: [[ref]]\n---\n");
+    write_file(&vault.join("nested/child.md"), "---\ntype: [[area]]\n---\n");
+    write_file(&vault.join("Foo.md"), "---\ntype: [[area]]\n---\n");
+
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-targets json");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).contains("Foo.md")
+            && stderr(&output).contains("skipping non-routable note"),
+        "expected non-routable warning:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bob_dir"], vault.display().to_string());
+    assert_eq!(json["count"], 6);
+
+    let targets = json["targets"].as_array().expect("targets array");
+    let routes = targets
+        .iter()
+        .map(|target| target["route"].as_str().expect("route string"))
+        .collect::<Vec<_>>();
+    assert_eq!(routes, ["mac_inbox", "cash", "dev", "bob", "odd", "sase"]);
+
+    assert_eq!(targets[0]["name"], "mac_inbox");
+    assert_eq!(targets[0]["label"], "mac_inbox.md");
+    assert_eq!(targets[0]["kind"], "inbox");
+    assert_eq!(targets[0]["is_default"], true);
+    assert!(targets[0]["status"].is_null());
+    assert_eq!(targets[0]["relative_path"], "mac_inbox.md");
+    assert_eq!(targets[1]["kind"], "area");
+    assert!(targets[1]["status"].is_null());
+    assert_eq!(targets[3]["kind"], "project");
+    assert_eq!(targets[3]["status"], "wip");
+    assert_eq!(targets[4]["status"], "blocked");
+    assert_eq!(targets[5]["status"], "waiting");
+}
+
+#[test]
+fn capture_targets_human_groups_and_summarizes_without_ansi() {
+    let temp = TempDir::new("bob-cli-capture-targets-human");
+    let vault = temp.path().join("vault");
+
+    write_file(&vault.join("cash.md"), "---\ntype: [[area]]\n---\n");
+    write_file(
+        &vault.join("bob.md"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n",
+    );
+    write_file(
+        &vault.join("sase.md"),
+        "---\ntype: [[project]]\nstatus: waiting\n---\n",
+    );
+
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .output()
+        .expect("run bob capture-targets human");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected capture-targets stderr:\n{}",
+        format_output(&output)
+    );
+    assert_stdout_has_no_ansi(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("Capture targets - ")
+            && out.contains("  Inbox")
+            && out.contains("* mac_inbox")
+            && out.contains("default")
+            && out.contains("  Areas")
+            && out.contains("cash.md")
+            && out.contains("  Active projects")
+            && out.contains("bob.md")
+            && out.contains("waiting")
+            && out.contains("4 targets - 1 inbox - 1 area - 2 active projects"),
+        "unexpected capture-targets human output:\n{out}"
+    );
+    assert_text_order(&out, &["mac_inbox.md", "cash.md", "bob.md", "sase.md"]);
+}
+
+#[test]
+fn capture_targets_empty_vault_still_lists_inbox_default() {
+    let temp = TempDir::new("bob-cli-capture-targets-empty");
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(&vault).expect("create vault");
+
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-targets empty vault");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected empty-vault stderr:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["targets"][0]["route"], "mac_inbox");
+    assert_eq!(json["targets"][0]["kind"], "inbox");
+    assert_eq!(json["targets"][0]["is_default"], true);
+}
+
+#[test]
+fn capture_targets_json_failure_prints_error_object() {
+    let temp = TempDir::new("bob-cli-capture-targets-json-failure");
+    let missing_vault = temp.path().join("missing-vault");
+
+    let output = bob_command()
+        .arg("capture-targets")
+        .arg("-b")
+        .arg(&missing_vault)
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-targets json failure");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "missing vault should be an IO failure:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).is_empty(),
+        "json failure should keep stderr clean:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("failed to read directory")),
         "unexpected json failure object: {json}"
     );
 }
@@ -8273,12 +8509,15 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
 
     let order = [
         "bulk-git-commit",
+        "capture",
+        "capture-targets",
         "dataview",
         "highlights",
         "move-done-tasks",
         "nightly",
         "notify",
         "pomodoro",
+        "projects",
         "tmux-pomodoro",
     ];
     let mut last = 0;
@@ -8297,6 +8536,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     assert!(
         help.contains("Examples:")
             && help.contains("bob bulk-git-commit")
+            && help.contains("bob capture-targets --format json")
             && help.contains("bob dataview --source '#project'")
             && help.contains("bob highlights scan --dry-run")
             && help.contains("bob move-done-tasks --threshold 10")

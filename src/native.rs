@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 
 mod capture;
+mod capture_targets;
 mod collect_done;
 mod dataview;
 mod env;
@@ -17,6 +18,7 @@ mod sync;
 pub(crate) enum NativeCommand {
     BulkGitCommit,
     Capture,
+    CaptureTargets,
     Dataview,
     Highlights,
     MoveDoneTasks,
@@ -43,6 +45,7 @@ pub(crate) fn run(command: NativeCommand, args: Vec<OsString>) -> i32 {
     match command {
         NativeCommand::BulkGitCommit => sync::run(args),
         NativeCommand::Capture => capture::run(args),
+        NativeCommand::CaptureTargets => capture_targets::run(args),
         NativeCommand::Dataview => dataview::run(args),
         NativeCommand::Highlights => highlights_ref::run(args),
         NativeCommand::MoveDoneTasks => collect_done::run(args),

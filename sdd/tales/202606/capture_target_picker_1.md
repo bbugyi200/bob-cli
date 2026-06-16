@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-16 09:20:05
-status: wip
+status: done
 prompt: sdd/prompts/202606/capture_target_picker_1.md
 ---
 # Plan: Filterable Target Picker for Unrouted Captured Tasks

@@ -43,6 +43,12 @@ const SUBCOMMANDS: &[Subcommand] = &[
         native_command: NativeCommand::Capture,
     },
     Subcommand {
+        name: "capture-targets",
+        script_command: None,
+        about: "List capture routes for inbox, area, and active project notes",
+        native_command: NativeCommand::CaptureTargets,
+    },
+    Subcommand {
         name: "dataview",
         script_command: None,
         about: "Run Dataview queries against the Bob vault",
@@ -228,6 +234,8 @@ Examples:
   bob bulk-git-commit             Commit and push Bob vault Git changes
   bob capture buy milk @groceries
                                  Capture a task into groceries.md
+  bob capture-targets --format json
+                                 List picker targets for task capture
   bob dataview --source '#project'
                                  Print matching note paths
   bob highlights scan --dry-run

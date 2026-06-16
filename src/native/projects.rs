@@ -230,7 +230,7 @@ struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ProjectStatus {
+pub(crate) enum ProjectStatus {
     Wip,
     Waiting,
     Done,
@@ -239,7 +239,7 @@ enum ProjectStatus {
 }
 
 impl ProjectStatus {
-    fn parse(value: Option<&str>) -> Self {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
         let Some(value) = value else {
             return Self::Wip;
         };
@@ -253,7 +253,7 @@ impl ProjectStatus {
         }
     }
 
-    fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Wip => "wip",
             Self::Waiting => "waiting",
@@ -284,7 +284,7 @@ impl ProjectStatus {
         matches!(self, Self::Canceled)
     }
 
-    fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         self.is_done() || self.is_canceled()
     }
 }
@@ -521,7 +521,7 @@ struct PrjCandidate<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct Frontmatter<'a> {
+pub(crate) struct Frontmatter<'a> {
     lines: Vec<&'a str>,
     body_start_line: usize,
 }
@@ -1731,7 +1731,7 @@ fn parse_project(
     })
 }
 
-fn parse_frontmatter(contents: &str) -> Option<Frontmatter<'_>> {
+pub(crate) fn parse_frontmatter(contents: &str) -> Option<Frontmatter<'_>> {
     let mut lines = contents.lines();
     let first = lines.next()?;
     if trim_cr(first) != "---" {
@@ -1753,13 +1753,21 @@ fn parse_frontmatter(contents: &str) -> Option<Frontmatter<'_>> {
     None
 }
 
-fn frontmatter_is_project(frontmatter: &Frontmatter<'_>) -> bool {
-    frontmatter_value(frontmatter, "type")
-        .map(trim_yaml_scalar)
-        .is_some_and(|value| value == "[[project]]")
+pub(crate) fn frontmatter_is_project(frontmatter: &Frontmatter<'_>) -> bool {
+    frontmatter_has_type(frontmatter, "[[project]]")
 }
 
-fn frontmatter_value<'a>(
+pub(crate) fn frontmatter_is_area(frontmatter: &Frontmatter<'_>) -> bool {
+    frontmatter_has_type(frontmatter, "[[area]]")
+}
+
+fn frontmatter_has_type(frontmatter: &Frontmatter<'_>, expected: &str) -> bool {
+    frontmatter_value(frontmatter, "type")
+        .map(trim_yaml_scalar)
+        .is_some_and(|value| value == expected)
+}
+
+pub(crate) fn frontmatter_value<'a>(
     frontmatter: &'a Frontmatter<'a>,
     key: &str,
 ) -> Option<&'a str> {
@@ -1776,7 +1784,7 @@ fn frontmatter_value<'a>(
     None
 }
 
-fn trim_yaml_scalar(value: &str) -> &str {
+pub(crate) fn trim_yaml_scalar(value: &str) -> &str {
     let value = value.trim();
     if value.len() >= 2 {
         let bytes = value.as_bytes();
@@ -2417,7 +2425,7 @@ fn display_path(path: &Path) -> String {
         .join("/")
 }
 
-fn is_markdown_file(path: &Path) -> bool {
+pub(crate) fn is_markdown_file(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "md")
 }
 
