@@ -606,6 +606,37 @@ fn capture_unrouted_appends_to_mac_inbox() {
 }
 
 #[test]
+fn capture_unrouted_prefers_tasks_section_in_existing_inbox() {
+    let temp = TempDir::new("bob-cli-capture-inbox-tasks-section");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("mac_inbox.md"),
+        "# Inbox\n- [ ] #task root\n## Tasks\n- [ ] #task existing\nTail\n",
+    );
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("buy")
+        .arg("milk")
+        .env("BOB_NOW", "2026-06-15 10:11:12")
+        .output()
+        .expect("run bob capture existing inbox");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("captured  mac_inbox.md"),
+        "unexpected capture output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("mac_inbox.md")).expect("read inbox"),
+        "# Inbox\n- [ ] #task root\n## Tasks\n- [ ] #task existing\n- [ ] #task buy milk [created::2026-06-15]\nTail\n"
+    );
+}
+
+#[test]
 fn capture_routed_prefix_inserts_and_suffix_creates_file() {
     let temp = TempDir::new("bob-cli-capture-routed");
     let vault = temp.path().join("vault");
@@ -657,6 +688,39 @@ fn capture_routed_prefix_inserts_and_suffix_creates_file() {
     assert_eq!(
         fs::read_to_string(vault.join("errands.md")).expect("read errands"),
         "- [ ] #task call vet [created::2026-06-15]\n"
+    );
+}
+
+#[test]
+fn capture_routed_prefers_tasks_section_over_root_task() {
+    let temp = TempDir::new("bob-cli-capture-routed-tasks-section");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("groceries.md"),
+        "# Groceries\n- [ ] #task root\n## Tasks\nNotes\n",
+    );
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("@Groceries")
+        .arg("pick")
+        .arg("apples")
+        .env("BOB_NOW", "2026-06-15")
+        .output()
+        .expect("run routed capture into tasks section");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("captured  groceries.md"),
+        "unexpected capture output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("groceries.md"))
+            .expect("read groceries"),
+        "# Groceries\n- [ ] #task root\n## Tasks\n\n- [ ] #task pick apples [created::2026-06-15]\nNotes\n"
     );
 }
 

@@ -71,10 +71,12 @@ system clock.
 Automatic routing matches the Hammerspoon capture keymap: a leading
 `@route text` prefix wins, otherwise a trailing `text @route` suffix is used.
 Route names use `A-Z`, `a-z`, `0-9`, `_`, and `-`, are lower-cased, and write
-to `<route>.md` at the vault root. Routed tasks are inserted after the last
-top-level `#task` block and its indented continuation lines. Unrouted captures
-append to `mac_inbox.md`; unlike the old Lua branch, the Rust command also adds
-a separating newline if that inbox file was missing a final newline.
+to `<route>.md` at the vault root. Existing target files, including
+`mac_inbox.md`, prefer a Markdown `Tasks` section: new captures insert after
+the last top-level `#task` block in that section, or after one blank line below
+the `Tasks` heading when the section has no tasks yet. Files without a `Tasks`
+section keep the older fallback of inserting after the last top-level `#task`
+block and its indented continuation lines, or appending at EOF.
 
 Useful options:
 

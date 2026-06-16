@@ -60,8 +60,8 @@ fn build_cli() -> ClapCommand {
             "Capture one task into the Bob Obsidian vault.\n\n\
 Text is normalized to one line, formatted as a #task with a [created::] stamp, \
 and written to mac_inbox.md unless an @route token or --route target is \
-provided. Routed tasks are inserted after the last top-level task block in \
-<route>.md, creating that route file when needed.",
+provided. Existing target files prefer a Tasks section, then fall back to the \
+last top-level task block. Missing target files are created when needed.",
         )
         .after_help(
             "Examples:\n  bob capture buy milk @groceries\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
@@ -262,11 +262,12 @@ fn capture_inbox(
     }
 
     let contents = read_target(target)?;
-    let addition = insertion_text(&contents, contents.len(), task_line);
+    let (updated, placement) = insert_task_line(&contents, task_line);
     if !dry_run {
-        append_to_file(target, &addition)?;
+        fs::write(target, updated)
+            .map_err(|error| fs_error("write target", target, error))?;
     }
-    Ok(Placement::Appended)
+    Ok(placement)
 }
 
 fn capture_routed(
@@ -303,15 +304,6 @@ fn write_new_file(target: &Path, task_line: &str) -> Result<(), CaptureError> {
         .open(target)
         .map_err(|error| fs_error("create target", target, error))?;
     file.write_all(contents.as_bytes())
-        .map_err(|error| fs_error("write target", target, error))
-}
-
-fn append_to_file(target: &Path, addition: &str) -> Result<(), CaptureError> {
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(target)
-        .map_err(|error| fs_error("open target", target, error))?;
-    file.write_all(addition.as_bytes())
         .map_err(|error| fs_error("write target", target, error))
 }
 
@@ -397,23 +389,42 @@ pub(crate) fn is_route_token(value: &str) -> bool {
 }
 
 fn insert_task_line(contents: &str, task_line: &str) -> (String, Placement) {
-    let Some(index) = last_task_block_insert_index(contents) else {
+    let lines = line_spans(contents);
+    if let Some(section) = tasks_section(&lines) {
+        let index = last_task_block_insert_index_in_range(
+            &lines,
+            section.start_line,
+            section.end_line,
+        )
+        .unwrap_or(section.heading_end);
+        let addition = if index == section.heading_end {
+            empty_tasks_section_insertion_text(contents, index, task_line)
+        } else {
+            insertion_text(contents, index, task_line)
+        };
+        return (insert_at(contents, index, &addition), Placement::Inserted);
+    }
+
+    let Some(index) =
+        last_task_block_insert_index_in_range(&lines, 0, lines.len())
+    else {
+        let addition = insertion_text(contents, contents.len(), task_line);
         return (
-            format!(
-                "{}{}",
-                contents,
-                insertion_text(contents, contents.len(), task_line)
-            ),
+            insert_at(contents, contents.len(), &addition),
             Placement::Appended,
         );
     };
 
     let addition = insertion_text(contents, index, task_line);
+    (insert_at(contents, index, &addition), Placement::Inserted)
+}
+
+fn insert_at(contents: &str, index: usize, addition: &str) -> String {
     let mut updated = String::with_capacity(contents.len() + addition.len());
     updated.push_str(&contents[..index]);
     updated.push_str(&addition);
     updated.push_str(&contents[index..]);
-    (updated, Placement::Inserted)
+    updated
 }
 
 fn insertion_text(contents: &str, index: usize, task_line: &str) -> String {
@@ -425,15 +436,197 @@ fn insertion_text(contents: &str, index: usize, task_line: &str) -> String {
     }
 }
 
-fn last_task_block_insert_index(contents: &str) -> Option<usize> {
-    let lines = line_spans(contents);
+fn empty_tasks_section_insertion_text(
+    contents: &str,
+    index: usize,
+    task_line: &str,
+) -> String {
+    if index > 0 && contents[..index].ends_with('\n') {
+        format!("\n{task_line}\n")
+    } else {
+        format!("\n\n{task_line}\n")
+    }
+}
+
+fn last_task_block_insert_index_in_range(
+    lines: &[LineSpan<'_>],
+    start_line: usize,
+    end_line: usize,
+) -> Option<usize> {
     let mut last_index = None;
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in lines[start_line..end_line].iter().enumerate() {
         if is_top_level_task_line(line.text) {
-            last_index = Some(task_block_end(&lines, index));
+            last_index = Some(task_block_end(lines, start_line + index));
         }
     }
     last_index
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TasksSection {
+    heading_end: usize,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn tasks_section(lines: &[LineSpan<'_>]) -> Option<TasksSection> {
+    let mut in_frontmatter = false;
+    let mut fence = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 && line.text.trim() == "---" {
+            in_frontmatter = true;
+            continue;
+        }
+
+        if in_frontmatter {
+            if line.text.trim() == "---" {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+
+        if let Some(open_fence) = fence {
+            if closes_fence(line.text, open_fence) {
+                fence = None;
+            }
+            continue;
+        }
+
+        if let Some(open_fence) = fence_marker(line.text) {
+            fence = Some(open_fence);
+            continue;
+        }
+
+        if atx_heading_title(line.text) == Some("Tasks") {
+            let start_line = index + 1;
+            let end_line =
+                next_heading_line(lines, start_line).unwrap_or(lines.len());
+            return Some(TasksSection {
+                heading_end: line.end,
+                start_line,
+                end_line,
+            });
+        }
+    }
+
+    None
+}
+
+fn next_heading_line(
+    lines: &[LineSpan<'_>],
+    start_line: usize,
+) -> Option<usize> {
+    let mut fence = None;
+
+    for (offset, line) in lines[start_line..].iter().enumerate() {
+        if let Some(open_fence) = fence {
+            if closes_fence(line.text, open_fence) {
+                fence = None;
+            }
+            continue;
+        }
+
+        if let Some(open_fence) = fence_marker(line.text) {
+            fence = Some(open_fence);
+            continue;
+        }
+
+        if atx_heading_title(line.text).is_some() {
+            return Some(start_line + offset);
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FenceMarker {
+    character: u8,
+    length: usize,
+}
+
+fn fence_marker(line: &str) -> Option<FenceMarker> {
+    let (marker, _) = fence_sequence(line)?;
+    Some(marker)
+}
+
+fn closes_fence(line: &str, open_fence: FenceMarker) -> bool {
+    let Some((marker, remainder)) = fence_sequence(line) else {
+        return false;
+    };
+
+    marker.character == open_fence.character
+        && marker.length >= open_fence.length
+        && remainder.trim().is_empty()
+}
+
+fn fence_sequence(line: &str) -> Option<(FenceMarker, &str)> {
+    let line = markdown_indented_line(line)?;
+    let bytes = line.as_bytes();
+    let character = *bytes.first()?;
+    if !matches!(character, b'`' | b'~') {
+        return None;
+    }
+
+    let length = bytes.iter().take_while(|byte| **byte == character).count();
+    if length < 3 {
+        return None;
+    }
+
+    Some((FenceMarker { character, length }, &line[length..]))
+}
+
+fn atx_heading_title(line: &str) -> Option<&str> {
+    let line = markdown_indented_line(line)?;
+    let hashes = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b'#')
+        .count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+
+    if line
+        .as_bytes()
+        .get(hashes)
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+
+    Some(strip_closing_atx_hashes(line[hashes..].trim()))
+}
+
+fn strip_closing_atx_hashes(title: &str) -> &str {
+    let trimmed = title.trim_end();
+    let without_hashes = trimmed.trim_end_matches('#');
+    if without_hashes.len() == trimmed.len() {
+        return trimmed;
+    }
+
+    if without_hashes
+        .chars()
+        .next_back()
+        .map_or(true, char::is_whitespace)
+    {
+        without_hashes.trim_end()
+    } else {
+        trimmed
+    }
+}
+
+fn markdown_indented_line(line: &str) -> Option<&str> {
+    let spaces = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count();
+    if spaces > 3 {
+        return None;
+    }
+    Some(&line[spaces..])
 }
 
 fn task_block_end(lines: &[LineSpan<'_>], task_index: usize) -> usize {
@@ -783,6 +976,124 @@ mod tests {
                 format!("  - [ ] #task nested\n{TASK}\n"),
                 Placement::Appended,
             )
+        );
+    }
+
+    #[test]
+    fn tasks_section_wins_over_root_task_when_empty() {
+        let contents = "# Project\n- [ ] #task root\n## Tasks\nNotes\n";
+        assert_eq!(
+            insert_task_line(contents, TASK),
+            (
+                format!(
+                    "# Project\n- [ ] #task root\n## Tasks\n\n{TASK}\nNotes\n"
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn tasks_section_inserts_after_last_task_block_in_section() {
+        let contents = concat!(
+            "# Project\n",
+            "- [ ] #task root\n",
+            "## Tasks\n",
+            "Intro\n",
+            "- [ ] #task old\n",
+            "  detail\n",
+            "\n",
+            "\tmore\n",
+            "After\n",
+        );
+        assert_eq!(
+            insert_task_line(contents, TASK),
+            (
+                format!(
+                    "{}{TASK}\nAfter\n",
+                    concat!(
+                        "# Project\n",
+                        "- [ ] #task root\n",
+                        "## Tasks\n",
+                        "Intro\n",
+                        "- [ ] #task old\n",
+                        "  detail\n",
+                        "\n",
+                        "\tmore\n",
+                    )
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn later_task_outside_tasks_section_does_not_win() {
+        let contents =
+            "## Tasks\n- [ ] #task in section\n## Other\n- [ ] #task outside\n";
+        assert_eq!(
+            insert_task_line(contents, TASK),
+            (
+                format!(
+                    "## Tasks\n- [ ] #task in section\n{TASK}\n## Other\n- [ ] #task outside\n"
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn ignores_tasks_headings_in_frontmatter_and_fenced_code() {
+        let contents = concat!(
+            "---\n",
+            "# Tasks\n",
+            "---\n",
+            "```md\n",
+            "## Tasks\n",
+            "```\n",
+            "- [ ] #task old\n",
+            "Tail\n",
+        );
+        assert_eq!(
+            insert_task_line(contents, TASK),
+            (
+                format!(
+                    "---\n\
+                     # Tasks\n\
+                     ---\n\
+                     ```md\n\
+                     ## Tasks\n\
+                     ```\n\
+                     - [ ] #task old\n\
+                     {TASK}\n\
+                     Tail\n"
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn nested_heading_stops_empty_tasks_section_insertion() {
+        let contents = "## Tasks\n### Later\n- [ ] #task later\n";
+        assert_eq!(
+            insert_task_line(contents, TASK),
+            (
+                format!("## Tasks\n\n{TASK}\n### Later\n- [ ] #task later\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn tasks_heading_at_eof_inserts_after_blank_line() {
+        assert_eq!(
+            insert_task_line("## Tasks", TASK),
+            (format!("## Tasks\n\n{TASK}\n"), Placement::Inserted,)
+        );
+        assert_eq!(
+            insert_task_line("## Tasks ##\n", TASK),
+            (format!("## Tasks ##\n\n{TASK}\n"), Placement::Inserted,)
         );
     }
 
