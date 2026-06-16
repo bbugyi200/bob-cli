@@ -566,7 +566,10 @@ fn capture_targets_help_lists_options_alphabetically() {
         help.contains("always pins mac_inbox first as the default"),
         "expected capture-targets long help:\n{help}"
     );
-    assert_text_order(&help, &["-b, --bob-dir", "-f, --format", "-h, --help"]);
+    assert_text_order(
+        &help,
+        &["-b, --bob-dir", "-f, --format", "-h, --help", "-v, --verbose"],
+    );
     assert_stdout_has_no_ansi(&output);
 }
 
@@ -977,9 +980,8 @@ fn capture_targets_json_lists_picker_targets_in_order() {
 
     assert_success(&output);
     assert!(
-        stderr(&output).contains("Foo.md")
-            && stderr(&output).contains("skipping non-routable note"),
-        "expected non-routable warning:\n{}",
+        stderr(&output).is_empty(),
+        "default capture-targets should keep skip warnings off stderr:\n{}",
         format_output(&output)
     );
     let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
@@ -1009,6 +1011,49 @@ fn capture_targets_json_lists_picker_targets_in_order() {
     assert_eq!(targets[3]["status"], "wip");
     assert_eq!(targets[4]["status"], "blocked");
     assert_eq!(targets[5]["status"], "waiting");
+}
+
+#[test]
+fn capture_targets_verbose_emits_skip_warnings() {
+    let temp = TempDir::new("bob-cli-capture-targets-verbose");
+    let vault = temp.path().join("vault");
+
+    write_file(&vault.join("cash.md"), "---\ntype: [[area]]\n---\n");
+    write_file(&vault.join("Foo.md"), "---\ntype: [[area]]\n---\n");
+
+    for flag in ["--verbose", "-v"] {
+        let output = bob_command()
+            .arg("capture-targets")
+            .arg("-b")
+            .arg(&vault)
+            .arg(flag)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run bob capture-targets {flag}: {error}")
+            });
+
+        assert_success(&output);
+        assert!(
+            stderr(&output).contains("Foo.md")
+                && stderr(&output).contains("skipping non-routable note"),
+            "expected `{flag}` to emit skip warning:\n{}",
+            format_output(&output)
+        );
+    }
+
+    let quiet = bob_command()
+        .arg("capture-targets")
+        .arg("-b")
+        .arg(&vault)
+        .output()
+        .expect("run bob capture-targets default");
+
+    assert_success(&quiet);
+    assert!(
+        stderr(&quiet).is_empty(),
+        "default capture-targets should keep skip warnings off stderr:\n{}",
+        format_output(&quiet)
+    );
 }
 
 #[test]

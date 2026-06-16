@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-16 10:30:37
-status: wip
+status: done
 prompt: sdd/prompts/202606/capture_targets_verbose_warnings.md
 ---
 # Plan: Gate capture-targets skip warnings behind verbose output

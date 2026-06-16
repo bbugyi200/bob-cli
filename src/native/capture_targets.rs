@@ -32,18 +32,21 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
     };
 
     let output_format = OutputFormat::from_matches(&matches);
+    let verbose = matches.get_flag("verbose");
     let bob_dir = bob_dir_from_matches(&matches);
     let report = scan_capture_targets(&bob_dir);
 
     if report.issues.is_empty() {
         print_success(&report.result(&bob_dir), output_format);
-        for warning in &report.warnings {
-            eprintln!("{COMMAND_NAME}: {}", warning.display());
+        if verbose {
+            for warning in &report.warnings {
+                eprintln!("{COMMAND_NAME}: {}", warning.display());
+            }
         }
         return 0;
     }
 
-    print_scan_error(&report, &bob_dir, output_format);
+    print_scan_error(&report, &bob_dir, output_format, verbose);
     1
 }
 
@@ -74,6 +77,7 @@ default. It is read-only.",
         .arg(bob_dir_arg())
         .arg(format_arg())
         .arg(help_arg())
+        .arg(verbose_arg())
 }
 
 fn bob_dir_arg() -> Arg {
@@ -101,6 +105,14 @@ fn help_arg() -> Arg {
         .short('h')
         .action(ArgAction::Help)
         .help("Show help")
+}
+
+fn verbose_arg() -> Arg {
+    Arg::new("verbose")
+        .long("verbose")
+        .short('v')
+        .action(ArgAction::SetTrue)
+        .help("Print skipped non-routable note warnings to stderr")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,12 +542,15 @@ fn print_scan_error(
     report: &CaptureTargetsReport,
     bob_dir: &Path,
     output_format: OutputFormat,
+    verbose: bool,
 ) {
     match output_format {
         OutputFormat::Human => {
             print_human_success(&report.result(bob_dir));
-            for warning in &report.warnings {
-                eprintln!("{COMMAND_NAME}: {}", warning.display());
+            if verbose {
+                for warning in &report.warnings {
+                    eprintln!("{COMMAND_NAME}: {}", warning.display());
+                }
             }
             for issue in &report.issues {
                 eprintln!("{COMMAND_NAME}: {}", issue.display());
