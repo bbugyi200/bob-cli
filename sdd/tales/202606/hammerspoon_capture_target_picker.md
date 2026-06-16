@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-16 09:44:13
-status: wip
+status: done
 prompt: sdd/prompts/202606/hammerspoon_capture_target_picker.md
 ---
 # Plan: Hammerspoon Capture Target Picker Integration
