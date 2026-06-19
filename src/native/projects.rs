@@ -291,6 +291,7 @@ impl ProjectStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetProjectStatus {
+    Wip,
     Done,
     Canceled,
 }
@@ -298,6 +299,7 @@ enum TargetProjectStatus {
 impl TargetProjectStatus {
     fn label(self) -> &'static str {
         match self {
+            Self::Wip => "wip",
             Self::Done => "done",
             Self::Canceled => "canceled",
         }
@@ -305,6 +307,7 @@ impl TargetProjectStatus {
 
     fn reason(self) -> &'static str {
         match self {
+            Self::Wip => "^prj task opened",
             Self::Done => "^prj task checked",
             Self::Canceled => "^prj task canceled",
         }
@@ -312,6 +315,7 @@ impl TargetProjectStatus {
 
     fn as_project_status(self) -> ProjectStatus {
         match self {
+            Self::Wip => ProjectStatus::Wip,
             Self::Done => ProjectStatus::Done,
             Self::Canceled => ProjectStatus::Canceled,
         }
@@ -320,7 +324,8 @@ impl TargetProjectStatus {
     fn matches(self, status: &ProjectStatus) -> bool {
         matches!(
             (self, status),
-            (Self::Done, ProjectStatus::Done)
+            (Self::Wip, ProjectStatus::Wip)
+                | (Self::Done, ProjectStatus::Done)
                 | (Self::Canceled, ProjectStatus::Canceled)
         )
     }
@@ -359,12 +364,22 @@ impl PrjTask {
         }
     }
 
-    fn target_status(&self) -> Option<TargetProjectStatus> {
+    /// Resolves the lifecycle status this `^prj` task targets for `status`.
+    ///
+    /// Checked and canceled tasks always close the project. An open task only
+    /// reopens to `wip` when the parsed frontmatter status is terminal, so
+    /// `waiting`, missing, and other non-terminal statuses are left untouched.
+    fn target_status(
+        &self,
+        status: &ProjectStatus,
+    ) -> Option<TargetProjectStatus> {
         match self.state {
             PrjTaskState::Done => Some(TargetProjectStatus::Done),
             PrjTaskState::Canceled => Some(TargetProjectStatus::Canceled),
+            PrjTaskState::Open => {
+                status.is_terminal().then_some(TargetProjectStatus::Wip)
+            }
             PrjTaskState::Missing
-            | PrjTaskState::Open
             | PrjTaskState::Malformed
             | PrjTaskState::Multiple => None,
         }
@@ -428,7 +443,9 @@ enum SubprojectState {
 
 impl SubprojectState {
     fn from_project(project: &Project) -> Option<Self> {
-        if let Some(target) = project.prj_task.target_status() {
+        if let Some(target) =
+            project.prj_task.target_status(&project.status)
+        {
             return Some(Self::from_target_status(target));
         }
         match project.status {
@@ -449,6 +466,7 @@ impl SubprojectState {
 
     fn from_target_status(status: TargetProjectStatus) -> Self {
         match status {
+            TargetProjectStatus::Wip => Self::Open,
             TargetProjectStatus::Done => Self::Done,
             TargetProjectStatus::Canceled => Self::Canceled,
         }
@@ -1017,16 +1035,6 @@ fn plan_project_sync(
         });
     }
 
-    if project.prj_task.state == PrjTaskState::Open
-        && project.status.is_terminal()
-    {
-        plan.warnings.push(SyncEvent::Warning {
-            project_name: project.name.clone(),
-            message: "^prj task is still open".to_string(),
-            detail: format!("frontmatter status is {}", project.status.label()),
-        });
-    }
-
     if project.prj_task.placeholder {
         plan.warnings.push(SyncEvent::Warning {
             project_name: project.name.clone(),
@@ -1037,7 +1045,7 @@ fn plan_project_sync(
     }
 
     let mut effective_status = project.status.clone();
-    if let Some(target) = project.prj_task.target_status()
+    if let Some(target) = project.prj_task.target_status(&project.status)
         && !target.matches(&project.status)
     {
         plan.changes.push(ProjectChange::Status {
@@ -2996,7 +3004,7 @@ status: wip
         );
         let terminal = parse_clean_project(
             "Terminal.md",
-            "---\ntype: [[project]]\nstatus: done\n---\n- [ ] #task Ship terminal #hide ^prj\n\t- [[OldChild]]\n",
+            "---\ntype: [[project]]\nstatus: canceled\n---\n- [-] #task Ship terminal #hide ^prj\n\t- [[OldChild]]\n",
         );
         let children = [open_subproject("Child")];
 
@@ -3087,7 +3095,7 @@ status: wip
                 done_subproject("CheckedChild"),
                 open_subproject("OpenChild"),
                 open_subproject("PathCaseChild"),
-                done_subproject("TerminalStatusOpenChild"),
+                open_subproject("TerminalStatusOpenChild"),
             ])
         );
         assert_eq!(
@@ -3099,6 +3107,36 @@ status: wip
         let non_parent_links =
             subproject_children_by_parent_link_name([&area_child]);
         assert!(!non_parent_links.contains_key(&parent.link_name));
+    }
+
+    #[test]
+    fn subproject_state_treats_terminal_open_prj_child_as_open() {
+        // A child whose frontmatter is terminal but whose ^prj task is open
+        // again should count as open for parent ledgers in the same sync run,
+        // mirroring the same-run handling for checked/canceled tasks.
+        for terminal in ["done", "canceled"] {
+            let reopened = parse_clean_project(
+                "Child.md",
+                &format!(
+                    "---\ntype: [[project]]\nstatus: {terminal}\n---\n- [ ] #task Ship child #hide ^prj\n"
+                ),
+            );
+            assert_eq!(
+                SubprojectState::from_project(&reopened),
+                Some(SubprojectState::Open),
+                "terminal status {terminal} with an open ^prj should be open"
+            );
+        }
+
+        // A terminal child whose ^prj task is missing stays terminal.
+        let closed = parse_clean_project(
+            "Closed.md",
+            "---\ntype: [[project]]\nstatus: done\n---\n- [ ] #task Needs completion task\n",
+        );
+        assert_eq!(
+            SubprojectState::from_project(&closed),
+            Some(SubprojectState::Done)
+        );
     }
 
     #[test]
@@ -3146,7 +3184,56 @@ status: wip
     }
 
     #[test]
-    fn project_sync_plan_warns_without_auto_fixing_drift_and_placeholder() {
+    fn project_sync_plan_reopens_terminal_project_from_open_prj() {
+        for terminal in ["done", "canceled"] {
+            let contents = format!(
+                "---\ntype: [[project]]\nstatus: {terminal}\n---\n- [ ] #task Ship #hide ^prj\n"
+            );
+            let project =
+                parse_clean_project("Reopened.md", &contents);
+            let plan = plan_project_sync(&project, &[]);
+
+            // The open ^prj reopens the terminal project to wip, and because
+            // the effective status is now active the surfacing pass runs in the
+            // same sync, removing #hide from the otherwise-empty project.
+            assert_eq!(
+                plan.changes,
+                vec![
+                    ProjectChange::Status {
+                        from: terminal.to_string(),
+                        to: TargetProjectStatus::Wip,
+                    },
+                    ProjectChange::RemoveHideTag,
+                ],
+                "status {terminal} should reopen to wip and surface"
+            );
+            assert!(plan.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn project_sync_plan_leaves_non_terminal_open_prj_status_untouched() {
+        for status in ["wip", "waiting"] {
+            let contents = format!(
+                "---\ntype: [[project]]\nstatus: {status}\n---\n- [ ] #task Ship #hide ^prj\n"
+            );
+            let project = parse_clean_project("Active.md", &contents);
+            let plan = plan_project_sync(&project, &[]);
+
+            // Only terminal statuses are reopenable; an open ^prj never forces
+            // waiting (or an already-active status) to wip.
+            assert!(
+                !plan.changes.iter().any(|change| matches!(
+                    change,
+                    ProjectChange::Status { .. }
+                )),
+                "status {status} should not be rewritten by an open ^prj"
+            );
+        }
+    }
+
+    #[test]
+    fn project_sync_plan_warns_on_placeholder_while_reopening() {
         let contents = format!(
             "---\ntype: [[project]]\nstatus: done\n---\n- [ ] #task {PLACEHOLDER_CRITERIA} #hide ^prj\n"
         );
@@ -3157,13 +3244,22 @@ status: wip
         let plan = plan_project_sync(&project, &[]);
 
         assert!(issues.is_empty());
-        assert!(plan.changes.is_empty());
-        assert_eq!(plan.warnings.len(), 2);
+        // The drift between terminal frontmatter and an open ^prj is now an
+        // explicit reopen rather than a warning, but the placeholder warning is
+        // still surfaced.
+        assert!(plan.changes.iter().any(|change| matches!(
+            change,
+            ProjectChange::Status {
+                to: TargetProjectStatus::Wip,
+                ..
+            }
+        )));
         assert!(
-            plan.warnings
+            !plan.warnings
                 .iter()
                 .any(|event| matches!(event, SyncEvent::Warning { message, .. } if message.contains("still open")))
         );
+        assert_eq!(plan.warnings.len(), 1);
         assert!(
             plan.warnings
                 .iter()

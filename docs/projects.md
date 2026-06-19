@@ -67,7 +67,9 @@ Task statuses follow the Tasks plugin convention:
 
 - `[x]` or `[X]` on the `^prj` task sets frontmatter `status: done`.
 - `[-]` on the `^prj` task sets frontmatter `status: canceled`.
-- Open `^prj` tasks do not change frontmatter status.
+- An open `^prj` task on a terminal project, `status: done` or
+  `status: canceled`, reopens it to `status: wip`. Open `^prj` tasks on `wip`,
+  `waiting`, or other non-terminal projects leave the status unchanged.
 - Active projects with zero non-hidden open tasks and no open sub-projects
   have `#hide` removed from their open `^prj` task so they surface in
   `dash.md`'s Tasks section.
@@ -88,18 +90,21 @@ Task statuses follow the Tasks plugin convention:
   generated line.
 - Existing `[scheduled::...]` fields are removed from open `^prj` tasks on
   active projects. `scheduled` is no longer used for project surfacing.
-- Terminal projects, `status: done` or `status: canceled`, never get `^prj`
-  line edits.
+- Terminal projects, `status: done` or `status: canceled`, get no `^prj` line
+  edits while their `^prj` task stays closed or missing. Reopening the `^prj`
+  task makes the project active again in the same run, so the surfacing,
+  `#hide`, and Sub-projects rules above apply from the reopened `wip` status.
 
 The dash Tasks query hides tasks with the `#hide` tag. A non-hidden task is an
 open `#task` line with no `#hide` tag at all. The `^prj` task itself never
 counts toward the non-hidden task count.
 
 An open sub-project is another project note whose `parent` wikilink resolves to
-this note's file stem and whose own `^prj` task is open. Checked, canceled, or
-terminal-frontmatter child projects do not keep the parent hidden; missing,
-malformed, or multiple non-terminal `^prj` child tasks are excluded from the
-generated line.
+this note's file stem and whose own `^prj` task is open. A child with terminal
+frontmatter but an open `^prj` task counts as open in the same run, because the
+open task reopens it to `wip`. Checked or canceled child projects do not keep the
+parent hidden; missing, malformed, or multiple non-terminal `^prj` child tasks
+are excluded from the generated line.
 
 Generated sub-project links use the child note's file stem with its original
 casing and no path or alias. Open children are always shown first, sorted
@@ -125,7 +130,6 @@ When a project has no `status:` line and the `^prj` task is checked or canceled,
 Warnings do not make the command fail and are not auto-fixed:
 
 - An active project has no `^prj` task.
-- A terminal project still has an open `^prj` task.
 - The `^prj` description is still
   `<short_project_completion_criteria_goes_here>`.
 

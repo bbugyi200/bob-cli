@@ -528,13 +528,19 @@ annotation-derived follow-up tasks. It is additive: legacy generated lines
 without `#ref` are still recognized. Checking it with `[x]` or `[X]` means
 `status: read`. Cancelling it with `[-]`
 means `status: abandoned` and may keep metadata such as
-`[cancelled:: 2026-06-04]`. Unchecking it does not infer a replacement status.
+`[cancelled:: 2026-06-04]`. Unchecking an already `read` or `abandoned` ref
+reopens it to `status: wip`; unchecking a task on an `unread`, `wip`, or `legacy`
+ref, a freshly generated task, or a ref whose deprecated `done` base is being
+migrated to `read`, infers no status. If the marker or frontmatter also moved the
+status to another non-`wip` value since the stored base, the reopen is reported
+as a conflict instead of silently picking a side.
 When the final synced status is `read`, `sync` checks the generated task line;
-when it is `abandoned`, `sync` cancels the generated task line. Existing notes
-without that exact generated line are not bulk-migrated. If the checked or
-cancelled task would update the PDF marker, `sync --dry-run` previews
-`pdf_marker_action: would-update`, plain `sync` refuses before writes, and
-targeted `sync --write-pdf` writes the marker. `scan --dry-run` previews this
+when it is `abandoned`, `sync` cancels the generated task line; when an unchecked
+task reopens the ref, `sync` leaves the generated task unchecked. Existing notes
+without that exact generated line are not bulk-migrated. If the checked,
+cancelled, or reopening task would update the PDF marker, `sync --dry-run`
+previews `pdf_marker_action: would-update`, plain `sync` refuses before writes,
+and targeted `sync --write-pdf` writes the marker. `scan --dry-run` previews this
 work. A writing scan keeps the default note-only refusal unless `--write-pdfs`
 is supplied.
 
@@ -542,7 +548,8 @@ Highlight comments and standalone non-marker notes can also create actionable
 Obsidian tasks when the marker/frontmatter-selected PDF status is `wip`, before
 the generated PDF `^ref` checkbox contributes a closing `read` or `abandoned`
 status. The final run that closes a `wip` PDF still imports newly added
-annotation tasks in that same run; subsequent runs whose selected status is
+annotation tasks in that same run, and a run that reopens a `read` or `abandoned`
+ref back to `wip` imports them too; subsequent runs whose selected status is
 already non-`wip` skip task intake. Any unordered Markdown bullet line whose
 item text contains `#task` as a whitespace-delimited token is copied to an
 unchecked task:

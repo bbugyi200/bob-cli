@@ -2723,13 +2723,15 @@ fn projects_sync_updates_status_prj_hide_tag_warns_and_is_idempotent() {
     assert!(
         out.contains("[dry-run] ok")
             && out.contains("would set status: waiting -> canceled")
+            && out.contains("would set status: done -> wip")
+            && out.contains("^prj task opened")
             && out.contains("would remove #hide from ^prj")
             && out.contains("would add #hide to ^prj")
             && out.contains("would remove [scheduled::2026-06-01] from ^prj")
             && out.contains("active project has no ^prj task")
             && out.contains("template placeholder")
             && out.contains(
-                "11 projects - 3 status updated - 5 ^prj edited - 3 warnings"
+                "11 projects - 4 status updated - 6 ^prj edited - 2 warnings"
             ),
         "unexpected dry-run output:\n{out}"
     );
@@ -2757,11 +2759,12 @@ fn projects_sync_updates_status_prj_hide_tag_warns_and_is_idempotent() {
     let out = stdout(&output);
     assert!(
         out.contains("status: wip -> done")
+            && out.contains("status: done -> wip")
             && out.contains("removed #hide from ^prj")
             && out.contains("added #hide to ^prj")
             && out.contains("removed [scheduled::2026-06-01] from ^prj")
             && out.contains(
-                "11 projects - 3 status updated - 5 ^prj edited - 3 warnings"
+                "11 projects - 4 status updated - 6 ^prj edited - 2 warnings"
             ),
         "unexpected sync output:\n{out}"
     );
@@ -2802,6 +2805,11 @@ fn projects_sync_updates_status_prj_hide_tag_warns_and_is_idempotent() {
             .expect("read scheduled"),
         "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish already scheduled ^prj\n"
     );
+    assert_eq!(
+        fs::read_to_string(vault.join("TerminalOpen.md"))
+            .expect("read terminal open"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish drift ^prj\n"
+    );
 
     let output = bob_command()
         .arg("projects")
@@ -2814,7 +2822,7 @@ fn projects_sync_updates_status_prj_hide_tag_warns_and_is_idempotent() {
     assert_success(&output);
     assert!(
         stdout(&output).contains(
-            "11 projects - 0 status updated - 0 ^prj edited - 3 warnings"
+            "11 projects - 0 status updated - 0 ^prj edited - 2 warnings"
         ),
         "second run should have zero actions:\n{}",
         format_output(&output)
@@ -2969,6 +2977,71 @@ fn projects_sync_unhides_parent_when_child_prj_is_checked_same_run() {
     assert_eq!(
         fs::read_to_string(vault.join("Child.md")).expect("read child"),
         "---\ntype: [[project]]\nstatus: done\nparent: [[Parent]]\n---\n- [x] #task Finish child #hide ^prj\n"
+    );
+
+    let output = bob_command()
+        .arg("projects")
+        .arg("sync")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .output()
+        .expect("rerun bob projects sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains(
+            "2 projects - 0 status updated - 0 ^prj edited - 0 warnings"
+        ),
+        "second run should have zero actions:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn projects_sync_reopens_parent_ledger_when_child_prj_is_reopened_same_run() {
+    let temp = TempDir::new("bob-cli-projects-sync-reopened-subproject");
+    let vault = temp.path().join("vault");
+
+    // The parent ledger shows the child as completed, but the child's
+    // frontmatter is terminal while its ^prj task is open again. One sync run
+    // should reopen the child to wip and flip the parent ledger back to open.
+    write_file(
+        &vault.join("Parent.md"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent #hide ^prj\n\t- 🧩 **Sub-projects:** ~~[[Child]]~~ ✅\n",
+    );
+    write_file(
+        &vault.join("Child.md"),
+        "---\ntype: [[project]]\nstatus: done\nparent: [[Parent]]\n---\n- [ ] #task Finish child #hide ^prj\n",
+    );
+
+    let output = bob_command()
+        .arg("projects")
+        .arg("sync")
+        .arg("--bob-dir")
+        .arg(&vault)
+        .output()
+        .expect("run bob projects sync");
+
+    assert_success(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("status: done -> wip  ^prj task opened")
+            && out.contains(
+                "removed #hide from ^prj  no non-hidden open tasks or open sub-projects"
+            )
+            && out.contains("updated [[Child]] on ^prj  open sub-project")
+            && out.contains(
+                "2 projects - 1 status updated - 2 ^prj edited - 0 warnings"
+            ),
+        "unexpected sync output:\n{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("Parent.md")).expect("read parent"),
+        "---\ntype: [[project]]\nstatus: wip\n---\n- [ ] #task Finish parent #hide ^prj\n\t- 🧩 **Sub-projects:** [[Child]]\n"
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("Child.md")).expect("read child"),
+        "---\ntype: [[project]]\nstatus: wip\nparent: [[Parent]]\n---\n- [ ] #task Finish child ^prj\n"
     );
 
     let output = bob_command()
@@ -5600,6 +5673,142 @@ fn highlights_ref_task_checked_dry_run_requires_and_writes_pdf_marker() {
         stdout(&output).contains("note_action: none")
             && stdout(&output).contains("writes: none"),
         "checked-task write-back should settle:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn highlights_ref_task_unchecked_scan_reopens_read_ref_to_wip() {
+    let temp = TempDir::new("bob-cli-highlights-ref-task-reopen");
+    let vault = temp.path().join("vault");
+    let pdf = vault.join("lib/example.pdf");
+    let note = vault.join("ref/example.md");
+    // Start from an already-read ref: the marker, note frontmatter, and the
+    // generated ^ref task all reflect the terminal state.
+    write_highlights_pdf(&pdf, "- status: read\n- parent: obsidian\n");
+    assert_success(
+        &bob_command()
+            .arg("highlights")
+            .arg("sync")
+            .arg(&pdf)
+            .env("BOB_DIR", &vault)
+            .output()
+            .expect("initial highlights sync"),
+    );
+
+    let read_note = fs::read_to_string(&note).expect("read ref note");
+    assert!(
+        read_note.contains("status: read\n")
+            && read_note.contains(
+                "- [x] #task #ref [[lib/example.pdf]] #hide ^ref\n"
+            ),
+        "expected a read ref with a checked ^ref task:\n{read_note}"
+    );
+    // The user unchecks the generated ^ref task to reopen the ref.
+    let reopened_note = read_note.replace("- [x] #task", "- [ ] #task");
+    write_file(&note, &reopened_note);
+    let marker_before = pdf_marker_contents(&pdf);
+
+    // A dry-run preview surfaces the reopen contribution and the pending marker
+    // write without touching anything.
+    let output = bob_command()
+        .arg("highlights")
+        .arg("scan")
+        .arg("--verbose")
+        .arg("--dry-run")
+        .arg("--write-pdfs")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("dry-run reopen scan with PDF writes enabled");
+
+    assert_success(&output);
+    let scan_dry_run = stdout(&output);
+    assert!(
+        scan_dry_run.contains("write_pdfs: true")
+            && scan_dry_run.contains("pdf_task: unchecked")
+            && scan_dry_run.contains("pdf_task_contribution: status=wip")
+            && scan_dry_run.contains("pdf_marker_action: would-update")
+            && scan_dry_run.contains("notes_update: 1")
+            && scan_dry_run.contains("writes: none"),
+        "expected reopen scan dry-run to preview marker work:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(fs::read_to_string(&note).expect("read note"), reopened_note);
+
+    // Without --write-pdfs the marker write-back is refused, exactly like the
+    // checked/cancelled task closing behavior.
+    let output = bob_command()
+        .arg("highlights")
+        .arg("scan")
+        .arg("--verbose")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("reopen scan without PDF writes");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "scan should refuse reopen PDF marker writes:\n{}",
+        format_output(&output)
+    );
+    let refusal = stdout(&output);
+    assert!(
+        refusal.contains("write_pdfs: false")
+            && refusal.contains("plan_error:")
+            && refusal.contains("--write-pdf")
+            && refusal.contains("plan_failures: 1")
+            && refusal.contains("writes: none"),
+        "expected scan planning refusal:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(pdf_marker_contents(&pdf), marker_before);
+    assert_eq!(fs::read_to_string(&note).expect("read note"), reopened_note);
+
+    // With --write-pdfs the ref note and PDF marker both move to wip while the
+    // generated ^ref task stays unchecked.
+    let output = bob_command()
+        .arg("highlights")
+        .arg("scan")
+        .arg("--verbose")
+        .arg("--write-pdfs")
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("reopen write-pdfs scan");
+
+    assert_success(&output);
+    let scan_write = stdout(&output);
+    assert!(
+        scan_write.contains("write_pdfs: true")
+            && scan_write.contains("pdf_task_contribution: status=wip")
+            && scan_write.contains("pdf_markers_updated: 1")
+            && scan_write.contains("writes: note,pdf"),
+        "expected reopen scan --write-pdfs to write note and PDF marker:\n{}",
+        format_output(&output)
+    );
+    let marker = pdf_marker_contents(&pdf);
+    assert!(marker.contains("- status: wip\n"), "{marker}");
+    let note_after_write = fs::read_to_string(&note).expect("read note");
+    assert!(note_after_write.contains("status: wip\n"), "{note_after_write}");
+    assert!(
+        note_after_write
+            .contains("- [ ] #task #ref [[lib/example.pdf]] #hide ^ref\n"),
+        "{note_after_write}"
+    );
+
+    let output = bob_command()
+        .arg("highlights")
+        .arg("sync")
+        .arg(&pdf)
+        .env("BOB_DIR", &vault)
+        .output()
+        .expect("repeat reopen sync");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("note_action: none")
+            && stdout(&output).contains("writes: none"),
+        "reopen write-back should settle:\n{}",
         format_output(&output)
     );
 }

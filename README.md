@@ -192,7 +192,8 @@ Scans the Bob vault for notes whose frontmatter declares
 table includes frontmatter status, open `#task` count, open P0 task count, and
 the state of the project completion task anchored with `^prj`. `sync` makes
 that `^prj` task the lifecycle control: checking it sets `status: done`,
-canceling it sets `status: canceled`, and active projects with no open P0 tasks
+canceling it sets `status: canceled`, reopening it on a `done` or `canceled`
+project sets `status: wip`, and active projects with no open P0 tasks
 get `[scheduled::YYYY-mm-dd]` appended to the open `^prj` task. Use
 `--dry-run` to preview the exact actions without writing.
 
@@ -233,9 +234,11 @@ the previous value; it is not a standard marker-synced field. Generated
 reference notes always include `type: "[[ref]]"` and include command-managed
 `ref_type` when it can be derived from the first library path component.
 The generated PDF task line is a status affordance: `[x]`/`[X]` contributes
-`status: read`, `[-]` contributes `status: abandoned`, and `[ ]` contributes no
-replacement status. PDF marker write-back for task-derived status still
-requires targeted `--write-pdf` or reviewed bulk `scan --write-pdfs`.
+`status: read`, `[-]` contributes `status: abandoned`, and unchecking it on an
+already `read` or `abandoned` ref reopens it to `status: wip` (a freshly
+generated `[ ]` task contributes no replacement status). PDF marker write-back
+for task-derived status still requires targeted `--write-pdf` or reviewed bulk
+`scan --write-pdfs`.
 
 For `lib/books/foo.pdf`, `sync` discovers `lib/books/foo.md` first and can
 parse simple `foo.textbundle/text.md` or `text.markdown` sidecars. Image and
@@ -253,7 +256,8 @@ lines tagged with `#task` inside highlight comments or standalone non-marker
 notes also create Obsidian tasks when the marker/frontmatter-selected PDF status
 is `wip`, before the generated PDF `^ref` checkbox contributes a closing
 `read` or `abandoned` status. That final closing run still imports newly added
-annotation tasks; later runs whose selected status is already non-`wip` skip
+annotation tasks, and a run that reopens a `read` or `abandoned` ref to `wip`
+imports them too; later runs whose selected status is already non-`wip` skip
 task intake. By default, tasks are inserted immediately under the generated PDF
 `^ref` line. If the final whitespace-delimited task token is a strict `@name`
 route suffix (`A-Z`, `a-z`, `0-9`, `_`, and `-`, starting with an

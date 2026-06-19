@@ -244,7 +244,10 @@ impl PdfTaskStatus {
             PdfTaskStatus::Abandoned => {
                 Some("cancelled PDF task set status abandoned")
             }
-            PdfTaskStatus::Missing | PdfTaskStatus::Unchecked => None,
+            PdfTaskStatus::Unchecked => {
+                Some("unchecked PDF task reopened status wip")
+            }
+            PdfTaskStatus::Missing => None,
         }
     }
 
@@ -252,7 +255,8 @@ impl PdfTaskStatus {
         match self {
             PdfTaskStatus::Read => "uncheck",
             PdfTaskStatus::Abandoned => "uncancel",
-            PdfTaskStatus::Missing | PdfTaskStatus::Unchecked => "clear",
+            PdfTaskStatus::Unchecked => "reclose",
+            PdfTaskStatus::Missing => "clear",
         }
     }
 }
@@ -848,15 +852,22 @@ fn plan_pdf_sync(
         note_exists: note.exists(),
         prefer: options.prefer,
     })?;
-    let annotation_task_intake_allowed =
+    // Capture intake eligibility before the `^ref` task signal so the final
+    // closing run still imports pending annotation tasks (pre-signal `wip`),
+    // then re-check after the signal so a reopen to `wip` also intakes in the
+    // same run instead of waiting for the next pass.
+    let intake_allowed_before_signal =
         projection_status_is(&resolution.projection, STATUS_WIP);
     let pdf_task_signal = apply_pdf_task_status_signal(
         &mut resolution,
         &pdf_task_line,
         base_projection.as_ref(),
+        base_status_normalized,
         &marker_projection,
         &frontmatter_projection,
     )?;
+    let annotation_task_intake_allowed = intake_allowed_before_signal
+        || projection_status_is(&resolution.projection, STATUS_WIP);
     let decision = resolution.decision;
     let synced_projection = resolution.projection;
     validate_required_marker_keys(
@@ -4588,10 +4599,43 @@ fn contains_pdf_wikilink(line: &str) -> bool {
     false
 }
 
+/// Resolves the synced status an `^ref` task targets given the stored `base`.
+///
+/// Checked and cancelled tasks always close the ref. An unchecked (open)
+/// generated task only reopens to `wip` when the stored marker base status is
+/// already a clean terminal value (`read` or `abandoned`) — that is, the ref was
+/// actually closed and the user reopened the task. Newly generated unchecked
+/// tasks on `unread`, `wip`, or `legacy` refs, refs whose marker/frontmatter
+/// independently moved to a terminal status from a non-terminal base, refs whose
+/// base is still the deprecated `done` value being migrated to `read`, and
+/// missing tasks all contribute nothing.
+fn pdf_task_target_status(
+    status: PdfTaskStatus,
+    base_projection: Option<&Projection>,
+    base_status_normalized: bool,
+) -> Option<&'static str> {
+    if let Some(target) = status.target_status() {
+        return Some(target);
+    }
+    if matches!(status, PdfTaskStatus::Unchecked)
+        && !base_status_normalized
+        && base_projection.is_some_and(projection_status_is_terminal)
+    {
+        return Some(STATUS_WIP);
+    }
+    None
+}
+
+fn projection_status_is_terminal(projection: &Projection) -> bool {
+    projection_status_is(projection, STATUS_READ)
+        || projection_status_is(projection, STATUS_ABANDONED)
+}
+
 fn apply_pdf_task_status_signal(
     resolution: &mut SyncResolution,
     task_line: &PdfTaskLineState,
     base_projection: Option<&Projection>,
+    base_status_normalized: bool,
     marker_projection: &Projection,
     frontmatter_projection: &Projection,
 ) -> Result<PdfTaskStatusSignal> {
@@ -4600,7 +4644,11 @@ fn apply_pdf_task_status_signal(
         status,
         status_contributed: None,
     };
-    let Some(target_status) = status.target_status() else {
+    let Some(target_status) = pdf_task_target_status(
+        status,
+        base_projection,
+        base_status_normalized,
+    ) else {
         return Ok(signal);
     };
     if projection_status_is(&resolution.projection, target_status) {
@@ -8141,6 +8189,7 @@ Keep me here.
             &mut resolution,
             &task,
             Some(&base),
+            false,
             &base,
             &base,
         )
@@ -8160,6 +8209,209 @@ Keep me here.
             .decision
             .reason
             .contains("cancelled PDF task set status abandoned"));
+    }
+
+    fn signal_resolution(projection: &Projection) -> super::SyncResolution {
+        super::SyncResolution {
+            decision: super::SyncDecision {
+                source: super::SyncSource::AutoMerge,
+                reason: "marker/frontmatter unchanged".to_string(),
+                marker_contributed: false,
+                frontmatter_contributed: false,
+            },
+            projection: projection.clone(),
+        }
+    }
+
+    #[test]
+    fn highlights_ref_pdf_task_status_signal_reopens_terminal_to_wip() {
+        for terminal in [super::STATUS_READ, super::STATUS_ABANDONED] {
+            let base = test_projection(vec![
+                ("status", string_value(terminal)),
+                ("parent", string_value("[[obsidian]]")),
+            ]);
+            let mut resolution = signal_resolution(&base);
+            let task = super::parse_pdf_task_line(
+                "- [ ] #task [[lib/books/example.pdf]] #hide ^ref\n",
+            )
+            .expect("parse unchecked task");
+
+            let signal = super::apply_pdf_task_status_signal(
+                &mut resolution,
+                &task,
+                Some(&base),
+                false,
+                &base,
+                &base,
+            )
+            .expect("apply unchecked task signal");
+
+            assert_eq!(signal.status, super::PdfTaskStatus::Unchecked);
+            assert_eq!(signal.status_contributed, Some(super::STATUS_WIP));
+            assert_eq!(
+                resolution
+                    .projection
+                    .get(super::FIELD_STATUS)
+                    .and_then(MarkerValue::as_string),
+                Some(super::STATUS_WIP),
+                "{terminal} should reopen to wip"
+            );
+            assert!(resolution.decision.frontmatter_contributed);
+            assert!(resolution
+                .decision
+                .reason
+                .contains("unchecked PDF task reopened status wip"));
+        }
+    }
+
+    #[test]
+    fn highlights_ref_pdf_task_status_signal_unchecked_keeps_non_terminal() {
+        for status in [
+            super::STATUS_UNREAD,
+            super::STATUS_WIP,
+            super::STATUS_LEGACY,
+        ] {
+            let base = test_projection(vec![
+                ("status", string_value(status)),
+                ("parent", string_value("[[obsidian]]")),
+            ]);
+            let mut resolution = signal_resolution(&base);
+            let task = super::parse_pdf_task_line(
+                "- [ ] #task [[lib/books/example.pdf]] #hide ^ref\n",
+            )
+            .expect("parse unchecked task");
+
+            let signal = super::apply_pdf_task_status_signal(
+                &mut resolution,
+                &task,
+                Some(&base),
+                false,
+                &base,
+                &base,
+            )
+            .expect("apply unchecked task signal");
+
+            assert_eq!(signal.status_contributed, None);
+            assert_eq!(
+                resolution
+                    .projection
+                    .get(super::FIELD_STATUS)
+                    .and_then(MarkerValue::as_string),
+                Some(status),
+                "status {status} should be left untouched"
+            );
+            assert!(!resolution.decision.frontmatter_contributed);
+        }
+
+        // A missing ^ref task contributes nothing even when terminal.
+        let base = test_projection(vec![
+            ("status", string_value(super::STATUS_READ)),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let mut resolution = signal_resolution(&base);
+        let signal = super::apply_pdf_task_status_signal(
+            &mut resolution,
+            &super::PdfTaskLineState::Missing,
+            Some(&base),
+            false,
+            &base,
+            &base,
+        )
+        .expect("apply missing task signal");
+
+        assert_eq!(signal.status, super::PdfTaskStatus::Missing);
+        assert_eq!(signal.status_contributed, None);
+        assert_eq!(
+            resolution
+                .projection
+                .get(super::FIELD_STATUS)
+                .and_then(MarkerValue::as_string),
+            Some(super::STATUS_READ)
+        );
+        assert!(!resolution.decision.frontmatter_contributed);
+
+        // A base whose terminal status came from migrating the deprecated `done`
+        // value is not a reopen: the unchecked task should be rewritten to match
+        // the migrated status, not flip the ref back to wip.
+        let base = test_projection(vec![
+            ("status", string_value(super::STATUS_READ)),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let mut resolution = signal_resolution(&base);
+        let task = super::parse_pdf_task_line(
+            "- [ ] #task [[lib/books/example.pdf]] #hide ^ref\n",
+        )
+        .expect("parse unchecked task");
+        let signal = super::apply_pdf_task_status_signal(
+            &mut resolution,
+            &task,
+            Some(&base),
+            true,
+            &base,
+            &base,
+        )
+        .expect("apply unchecked task signal over migrated base");
+
+        assert_eq!(signal.status_contributed, None);
+        assert_eq!(
+            resolution
+                .projection
+                .get(super::FIELD_STATUS)
+                .and_then(MarkerValue::as_string),
+            Some(super::STATUS_READ)
+        );
+        assert!(!resolution.decision.frontmatter_contributed);
+    }
+
+    #[test]
+    fn highlights_ref_pdf_task_status_signal_reopen_conflicts_with_competing_edit()
+    {
+        let base = test_projection(vec![
+            ("status", string_value(super::STATUS_READ)),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        // The marker is unchanged from the stored base, but the frontmatter was
+        // edited to a different terminal status. Unchecking the ^ref task wants
+        // wip, which neither side selected, so the command must report it.
+        let marker = base.clone();
+        let frontmatter = test_projection(vec![
+            ("status", string_value(super::STATUS_ABANDONED)),
+            ("parent", string_value("[[obsidian]]")),
+        ]);
+        let mut resolution = super::SyncResolution {
+            decision: super::SyncDecision {
+                source: super::SyncSource::Frontmatter,
+                reason: "frontmatter changed status".to_string(),
+                marker_contributed: false,
+                frontmatter_contributed: true,
+            },
+            projection: frontmatter.clone(),
+        };
+        let task = super::parse_pdf_task_line(
+            "- [ ] #task [[lib/books/example.pdf]] #hide ^ref\n",
+        )
+        .expect("parse unchecked task");
+
+        let error = super::apply_pdf_task_status_signal(
+            &mut resolution,
+            &task,
+            Some(&base),
+            false,
+            &marker,
+            &frontmatter,
+        )
+        .expect_err("competing status edit should conflict");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("conflicts with marker/frontmatter status edit"),
+            "unexpected conflict message: {message}"
+        );
+        assert!(
+            message.contains("reclose the PDF task")
+                && message.contains("status to wip"),
+            "unexpected conflict resolution hint: {message}"
+        );
     }
 
     #[test]

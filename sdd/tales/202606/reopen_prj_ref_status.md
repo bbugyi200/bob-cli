@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 14:13:50
-status: wip
+status: done
 prompt: sdd/prompts/202606/reopen_prj_ref_status.md
 ---
 # Plan: Reopen Project and Reference Status from Main Tasks
