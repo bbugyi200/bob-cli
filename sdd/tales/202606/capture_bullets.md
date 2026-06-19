@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 09:11:25
-status: wip
+status: done
 prompt: sdd/prompts/202606/capture_bullets.md
 ---
 # Plan: Add bullet captures to `bob capture`

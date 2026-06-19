@@ -55,16 +55,21 @@ fn print_clap_error(error: clap::Error) -> i32 {
 
 fn build_cli() -> ClapCommand {
     ClapCommand::new(COMMAND_NAME)
-        .about("Capture a task into the Bob vault")
+        .about("Capture a task or bullet into the Bob vault")
         .long_about(
             "Capture one task into the Bob Obsidian vault.\n\n\
 Text is normalized to one line, formatted as a #task with a [created::] stamp, \
 and written to mac_inbox.md unless an @route token or --route target is \
 provided. Existing target files prefer a Tasks section, then fall back to the \
-last top-level task block. Missing target files are created when needed.",
+last top-level task block. Missing target files are created when needed.\n\n\
+A terminal '#' or '#<section-prefix>' marker captures an ordinary bullet \
+instead. It renders as '- <body> [created::YYYY-MM-DD]' and is placed in the \
+first non-Tasks section whose heading title starts with the prefix, or the \
+first non-Tasks section for a bare '#'. A terminal @route and the '#' marker \
+may appear in either order.",
         )
         .after_help(
-            "Examples:\n  bob capture buy milk @groceries\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
+            "Examples:\n  bob capture buy milk @groceries\n  bob capture jot idea #Ideas @notes\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
         )
         .disable_help_flag(true)
         .arg(bob_dir_arg())
@@ -198,14 +203,21 @@ fn capture(request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
     let parsed =
         parse_capture_text(&request.raw_text, request.forced_route.as_deref())?;
     let created = current_date_string();
-    let task_line = format_task_line(&parsed.body, &created);
+    let capture_line = match &parsed.kind {
+        CaptureKind::Task => format_task_line(&parsed.body, &created),
+        CaptureKind::Bullet { .. } => {
+            format_bullet_line(&parsed.body, &created)
+        }
+    };
+    let kind_label = capture_kind_label(&parsed.kind);
     let relative_target = relative_target(parsed.route.as_deref());
     let target = request.bob_dir.join(&relative_target);
-    let placement = if parsed.route.is_some() {
-        capture_routed(&target, &task_line, request.dry_run)?
-    } else {
-        capture_inbox(&target, &task_line, request.dry_run)?
-    };
+    let placement = capture_to_target(
+        &target,
+        &capture_line,
+        &parsed.kind,
+        request.dry_run,
+    )?;
 
     Ok(CaptureResult {
         ok: true,
@@ -220,10 +232,18 @@ fn capture(request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
         relative_target: relative_target.to_string_lossy().into_owned(),
         target: target.display().to_string(),
         text: parsed.body,
-        task_line,
+        task_line: capture_line,
+        kind: kind_label,
         created,
         placement,
     })
+}
+
+fn capture_kind_label(kind: &CaptureKind) -> &'static str {
+    match kind {
+        CaptureKind::Task => "task",
+        CaptureKind::Bullet { .. } => "bullet",
+    }
 }
 
 fn current_date_string() -> String {
@@ -249,41 +269,32 @@ fn format_task_line(body: &str, created: &str) -> String {
     format!("- [ ] #task {body} [created::{created}]")
 }
 
-fn capture_inbox(
-    target: &Path,
-    task_line: &str,
-    dry_run: bool,
-) -> Result<Placement, CaptureError> {
-    if !target.exists() {
-        if !dry_run {
-            write_new_file(target, task_line)?;
-        }
-        return Ok(Placement::Created);
-    }
-
-    let contents = read_target(target)?;
-    let (updated, placement) = insert_task_line(&contents, task_line);
-    if !dry_run {
-        fs::write(target, updated)
-            .map_err(|error| fs_error("write target", target, error))?;
-    }
-    Ok(placement)
+fn format_bullet_line(body: &str, created: &str) -> String {
+    format!("- {body} [created::{created}]")
 }
 
-fn capture_routed(
+fn capture_to_target(
     target: &Path,
-    task_line: &str,
+    capture_line: &str,
+    kind: &CaptureKind,
     dry_run: bool,
 ) -> Result<Placement, CaptureError> {
     if !target.exists() {
         if !dry_run {
-            write_new_file(target, task_line)?;
+            write_new_file(target, capture_line)?;
         }
         return Ok(Placement::Created);
     }
 
     let contents = read_target(target)?;
-    let (updated, placement) = insert_task_line(&contents, task_line);
+    let (updated, placement) = match kind {
+        CaptureKind::Task => insert_task_line(&contents, capture_line),
+        CaptureKind::Bullet { section_prefix } => insert_bullet_line(
+            &contents,
+            capture_line,
+            section_prefix.as_deref(),
+        ),
+    };
     if !dry_run {
         fs::write(target, updated)
             .map_err(|error| fs_error("write target", target, error))?;
@@ -296,8 +307,11 @@ fn read_target(target: &Path) -> Result<String, CaptureError> {
         .map_err(|error| fs_error("read target", target, error))
 }
 
-fn write_new_file(target: &Path, task_line: &str) -> Result<(), CaptureError> {
-    let contents = format!("{task_line}\n");
+fn write_new_file(
+    target: &Path,
+    capture_line: &str,
+) -> Result<(), CaptureError> {
+    let contents = format!("{capture_line}\n");
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -312,8 +326,26 @@ fn fs_error(action: &str, path: &Path, error: io::Error) -> CaptureError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptureKind {
+    Task,
+    Bullet { section_prefix: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedCaptureText {
     body: String,
+    route: Option<String>,
+    kind: CaptureKind,
+}
+
+/// Terminal control tokens stripped from the end of a normalized capture.
+///
+/// `bullet` is the bullet marker: the outer `Option` records whether a terminal
+/// `#...` marker was present, and the inner `Option<String>` records its section
+/// prefix (`None` for a bare `#`).
+struct TerminalControls {
+    body: String,
+    bullet: Option<Option<String>>,
     route: Option<String>,
 }
 
@@ -323,52 +355,133 @@ fn parse_capture_text(
 ) -> Result<ParsedCaptureText, CaptureError> {
     let normalized = normalize_task_text(raw_text);
     if normalized.is_empty() {
-        return Err(CaptureError::usage(
-            "task text is required; pass TEXT or pipe one line on stdin",
-        ));
+        return Err(missing_text_error());
     }
 
+    let controls =
+        peel_terminal_controls(&normalized, forced_route.is_none());
+
     if let Some(route) = forced_route {
+        let route = normalize_forced_route(route)?;
+        let Some(section_prefix) = controls.bullet else {
+            return Ok(ParsedCaptureText {
+                body: normalized,
+                route: Some(route),
+                kind: CaptureKind::Task,
+            });
+        };
+        if controls.body.is_empty() {
+            return Err(missing_text_error());
+        }
         return Ok(ParsedCaptureText {
-            body: normalized,
-            route: Some(normalize_forced_route(route)?),
+            body: controls.body,
+            route: Some(route),
+            kind: CaptureKind::Bullet { section_prefix },
         });
     }
 
-    Ok(parse_auto_route(&normalized))
+    let Some(section_prefix) = controls.bullet else {
+        return Ok(parse_auto_route(&normalized));
+    };
+
+    if controls.body.is_empty() {
+        return Err(missing_text_error());
+    }
+
+    let (body, route) = match controls.route {
+        Some(route) => (controls.body, Some(route)),
+        None => parse_leading_route(&controls.body),
+    };
+    Ok(ParsedCaptureText {
+        body,
+        route,
+        kind: CaptureKind::Bullet { section_prefix },
+    })
+}
+
+fn missing_text_error() -> CaptureError {
+    CaptureError::usage(
+        "task text is required; pass TEXT or pipe one line on stdin",
+    )
 }
 
 fn normalize_task_text(raw_text: &str) -> String {
     raw_text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Peel a terminal bullet marker and (when `allow_route`) a terminal `@route`
+/// token off `normalized`, in either order, consuming at most one of each.
+fn peel_terminal_controls(
+    normalized: &str,
+    allow_route: bool,
+) -> TerminalControls {
+    let mut tokens: Vec<&str> = normalized.split(' ').collect();
+    let mut bullet: Option<Option<String>> = None;
+    let mut route: Option<String> = None;
+
+    while let Some(&last) = tokens.last() {
+        if bullet.is_none()
+            && let Some(rest) = last.strip_prefix('#')
+        {
+            bullet = Some((!rest.is_empty()).then(|| rest.to_string()));
+            tokens.pop();
+            continue;
+        }
+
+        if allow_route
+            && route.is_none()
+            && let Some(token) = last.strip_prefix('@')
+            && is_route_token(token)
+        {
+            route = Some(token.to_ascii_lowercase());
+            tokens.pop();
+            continue;
+        }
+
+        break;
+    }
+
+    TerminalControls {
+        body: tokens.join(" "),
+        bullet,
+        route,
+    }
+}
+
 fn parse_auto_route(text: &str) -> ParsedCaptureText {
+    let (body, route) = match parse_leading_route(text) {
+        (body, Some(route)) => (body, Some(route)),
+        (_, None) => parse_trailing_route(text),
+    };
+    ParsedCaptureText {
+        body,
+        route,
+        kind: CaptureKind::Task,
+    }
+}
+
+fn parse_leading_route(text: &str) -> (String, Option<String>) {
     if let Some(rest) = text.strip_prefix('@')
         && let Some((token, body)) = rest.split_once(' ')
         && is_route_token(token)
         && !body.is_empty()
     {
-        return ParsedCaptureText {
-            body: body.to_string(),
-            route: Some(token.to_ascii_lowercase()),
-        };
+        return (body.to_string(), Some(token.to_ascii_lowercase()));
     }
 
+    (text.to_string(), None)
+}
+
+fn parse_trailing_route(text: &str) -> (String, Option<String>) {
     if let Some(index) = text.rfind(" @") {
         let body = &text[..index];
         let token = &text[index + 2..];
         if !body.is_empty() && is_route_token(token) {
-            return ParsedCaptureText {
-                body: body.to_string(),
-                route: Some(token.to_ascii_lowercase()),
-            };
+            return (body.to_string(), Some(token.to_ascii_lowercase()));
         }
     }
 
-    ParsedCaptureText {
-        body: text.to_string(),
-        route: None,
-    }
+    (text.to_string(), None)
 }
 
 fn normalize_forced_route(route: &str) -> Result<String, CaptureError> {
@@ -398,7 +511,7 @@ fn insert_task_line(contents: &str, task_line: &str) -> (String, Placement) {
         )
         .unwrap_or(section.heading_end);
         let addition = if index == section.heading_end {
-            empty_tasks_section_insertion_text(contents, index, task_line)
+            empty_section_insertion_text(contents, index, task_line)
         } else {
             insertion_text(contents, index, task_line)
         };
@@ -427,24 +540,24 @@ fn insert_at(contents: &str, index: usize, addition: &str) -> String {
     updated
 }
 
-fn insertion_text(contents: &str, index: usize, task_line: &str) -> String {
+fn insertion_text(contents: &str, index: usize, line: &str) -> String {
     let needs_leading_newline = index > 0 && !contents[..index].ends_with('\n');
     if needs_leading_newline {
-        format!("\n{task_line}\n")
+        format!("\n{line}\n")
     } else {
-        format!("{task_line}\n")
+        format!("{line}\n")
     }
 }
 
-fn empty_tasks_section_insertion_text(
+fn empty_section_insertion_text(
     contents: &str,
     index: usize,
-    task_line: &str,
+    line: &str,
 ) -> String {
     if index > 0 && contents[..index].ends_with('\n') {
-        format!("\n{task_line}\n")
+        format!("\n{line}\n")
     } else {
-        format!("\n\n{task_line}\n")
+        format!("\n\n{line}\n")
     }
 }
 
@@ -462,14 +575,139 @@ fn last_task_block_insert_index_in_range(
     last_index
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TasksSection {
-    heading_end: usize,
-    start_line: usize,
-    end_line: usize,
+fn insert_bullet_line(
+    contents: &str,
+    bullet_line: &str,
+    section_prefix: Option<&str>,
+) -> (String, Placement) {
+    let lines = line_spans(contents);
+    let headings = markdown_headings(&lines);
+    let section = target_bullet_section(&lines, &headings, section_prefix);
+
+    if let Some(index) = last_bullet_block_insert_index_in_range(
+        &lines,
+        section.start_line,
+        section.end_line,
+    ) {
+        let addition = insertion_text(contents, index, bullet_line);
+        return (insert_at(contents, index, &addition), Placement::Inserted);
+    }
+
+    match section.heading_end {
+        Some(heading_end) => {
+            let addition = empty_section_insertion_text(
+                contents,
+                heading_end,
+                bullet_line,
+            );
+            (
+                insert_at(contents, heading_end, &addition),
+                Placement::Inserted,
+            )
+        }
+        None => {
+            let index = section.insertion_start;
+            let addition = insertion_text(contents, index, bullet_line);
+            let placement = if index >= contents.len() {
+                Placement::Appended
+            } else {
+                Placement::Inserted
+            };
+            (insert_at(contents, index, &addition), placement)
+        }
+    }
 }
 
-fn tasks_section(lines: &[LineSpan<'_>]) -> Option<TasksSection> {
+/// A Markdown section the bullet capture can target.
+///
+/// `heading_end` is the byte offset just past the heading line, or `None` for
+/// the zeroth (pre-heading) section. `start_line`/`end_line` bound the section
+/// body for bullet scanning, and `insertion_start` is where an empty zeroth
+/// section receives its first bullet.
+#[derive(Debug, Clone, Copy)]
+struct MarkdownSection {
+    heading_end: Option<usize>,
+    start_line: usize,
+    end_line: usize,
+    insertion_start: usize,
+}
+
+fn target_bullet_section(
+    lines: &[LineSpan<'_>],
+    headings: &[(usize, &str)],
+    section_prefix: Option<&str>,
+) -> MarkdownSection {
+    let target = headings.iter().position(|(_, title)| {
+        *title != "Tasks"
+            && section_prefix.is_none_or(|prefix| title.starts_with(prefix))
+    });
+
+    match target {
+        Some(pos) => {
+            let heading_index = headings[pos].0;
+            let heading_end = lines[heading_index].end;
+            let end_line = headings
+                .get(pos + 1)
+                .map(|(index, _)| *index)
+                .unwrap_or(lines.len());
+            MarkdownSection {
+                heading_end: Some(heading_end),
+                start_line: heading_index + 1,
+                end_line,
+                insertion_start: heading_end,
+            }
+        }
+        None => {
+            let (start_line, insertion_start) = match frontmatter_span(lines) {
+                Some((line_after, byte_end)) => (line_after, byte_end),
+                None => (0, 0),
+            };
+            let end_line = headings
+                .first()
+                .map(|(index, _)| *index)
+                .unwrap_or(lines.len());
+            MarkdownSection {
+                heading_end: None,
+                start_line,
+                end_line,
+                insertion_start,
+            }
+        }
+    }
+}
+
+fn last_bullet_block_insert_index_in_range(
+    lines: &[LineSpan<'_>],
+    start_line: usize,
+    end_line: usize,
+) -> Option<usize> {
+    let mut last_index = None;
+    for (offset, line) in lines[start_line..end_line].iter().enumerate() {
+        if is_top_level_bullet_line(line.text) {
+            last_index = Some(task_block_end(lines, start_line + offset));
+        }
+    }
+    last_index
+}
+
+fn is_top_level_bullet_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("- ") else {
+        return false;
+    };
+    !is_checkbox_marker(rest)
+}
+
+fn is_checkbox_marker(after_dash: &str) -> bool {
+    let mut chars = after_dash.chars();
+    chars.next() == Some('[')
+        && chars.next().is_some()
+        && chars.next() == Some(']')
+}
+
+/// Collect every ATX heading as `(line_index, title)`, skipping YAML
+/// frontmatter and fenced code blocks.
+fn markdown_headings<'a>(lines: &[LineSpan<'a>]) -> Vec<(usize, &'a str)> {
+    let mut headings = Vec::new();
     let mut in_frontmatter = false;
     let mut fence = None;
 
@@ -498,46 +736,49 @@ fn tasks_section(lines: &[LineSpan<'_>]) -> Option<TasksSection> {
             continue;
         }
 
-        if atx_heading_title(line.text) == Some("Tasks") {
-            let start_line = index + 1;
-            let end_line =
-                next_heading_line(lines, start_line).unwrap_or(lines.len());
-            return Some(TasksSection {
-                heading_end: line.end,
-                start_line,
-                end_line,
-            });
+        if let Some(title) = atx_heading_title(line.text) {
+            headings.push((index, title));
         }
     }
 
-    None
+    headings
 }
 
-fn next_heading_line(
-    lines: &[LineSpan<'_>],
-    start_line: usize,
-) -> Option<usize> {
-    let mut fence = None;
-
-    for (offset, line) in lines[start_line..].iter().enumerate() {
-        if let Some(open_fence) = fence {
-            if closes_fence(line.text, open_fence) {
-                fence = None;
-            }
-            continue;
-        }
-
-        if let Some(open_fence) = fence_marker(line.text) {
-            fence = Some(open_fence);
-            continue;
-        }
-
-        if atx_heading_title(line.text).is_some() {
-            return Some(start_line + offset);
-        }
+/// Byte span of YAML frontmatter as `(line_after, end_byte)` when the document
+/// opens with a closed `---` block.
+fn frontmatter_span(lines: &[LineSpan<'_>]) -> Option<(usize, usize)> {
+    if lines.first().map(|line| line.text.trim()) != Some("---") {
+        return None;
     }
 
-    None
+    lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, line)| line.text.trim() == "---")
+        .map(|(index, line)| (index + 1, line.end))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TasksSection {
+    heading_end: usize,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn tasks_section(lines: &[LineSpan<'_>]) -> Option<TasksSection> {
+    let headings = markdown_headings(lines);
+    let pos = headings.iter().position(|(_, title)| *title == "Tasks")?;
+    let heading_index = headings[pos].0;
+    let end_line = headings
+        .get(pos + 1)
+        .map(|(index, _)| *index)
+        .unwrap_or(lines.len());
+    Some(TasksSection {
+        heading_end: lines[heading_index].end,
+        start_line: heading_index + 1,
+        end_line,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -723,6 +964,7 @@ struct CaptureResult {
     target: String,
     text: String,
     task_line: String,
+    kind: &'static str,
     created: String,
     placement: Placement,
 }
@@ -815,6 +1057,7 @@ mod tests {
     use super::*;
 
     const TASK: &str = "- [ ] #task new thing [created::2026-06-15]";
+    const BULLET: &str = "- new idea [created::2026-06-15]";
 
     #[test]
     fn normalizes_whitespace() {
@@ -1109,6 +1352,7 @@ mod tests {
             target: "/tmp/bob/groceries.md".to_string(),
             text: "buy milk".to_string(),
             task_line: "- [ ] #task buy milk [created::2026-06-15]".to_string(),
+            kind: "task",
             created: "2026-06-15".to_string(),
             placement: Placement::Inserted,
         };
@@ -1127,7 +1371,211 @@ mod tests {
             value["task_line"],
             "- [ ] #task buy milk [created::2026-06-15]"
         );
+        assert_eq!(value["kind"], "task");
         assert_eq!(value["created"], "2026-06-15");
         assert_eq!(value["placement"], "inserted");
+    }
+
+    #[test]
+    fn parses_bullet_marker_with_section_prefix() {
+        let parsed =
+            parse_capture_text("Some bullet #Ideas", None).expect("parse");
+        assert_eq!(parsed.body, "Some bullet");
+        assert_eq!(parsed.route, None);
+        assert_eq!(
+            parsed.kind,
+            CaptureKind::Bullet {
+                section_prefix: Some("Ideas".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parses_bare_bullet_marker() {
+        let parsed = parse_capture_text("Some bullet #", None).expect("parse");
+        assert_eq!(parsed.body, "Some bullet");
+        assert_eq!(parsed.route, None);
+        assert_eq!(
+            parsed.kind,
+            CaptureKind::Bullet {
+                section_prefix: None
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_marker_order_is_equivalent() {
+        let leading_route =
+            parse_capture_text("Some bullet @foo #", None).expect("parse");
+        let trailing_route =
+            parse_capture_text("Some bullet # @foo", None).expect("parse");
+        assert_eq!(leading_route, trailing_route);
+        assert_eq!(leading_route.body, "Some bullet");
+        assert_eq!(leading_route.route.as_deref(), Some("foo"));
+        assert_eq!(
+            leading_route.kind,
+            CaptureKind::Bullet {
+                section_prefix: None
+            }
+        );
+    }
+
+    #[test]
+    fn bullet_marker_keeps_leading_route_when_no_terminal_route() {
+        let parsed =
+            parse_capture_text("@work Some bullet #Ideas", None).expect("parse");
+        assert_eq!(parsed.body, "Some bullet");
+        assert_eq!(parsed.route.as_deref(), Some("work"));
+        assert_eq!(
+            parsed.kind,
+            CaptureKind::Bullet {
+                section_prefix: Some("Ideas".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn forced_route_keeps_tokens_literal_but_consumes_bullet_marker() {
+        let parsed =
+            parse_capture_text("buy milk @groceries #Ideas", Some("Work"))
+                .expect("parse");
+        assert_eq!(parsed.body, "buy milk @groceries");
+        assert_eq!(parsed.route.as_deref(), Some("work"));
+        assert_eq!(
+            parsed.kind,
+            CaptureKind::Bullet {
+                section_prefix: Some("Ideas".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn marker_only_bullet_input_is_usage_error() {
+        let error = parse_capture_text("#", None).expect_err("marker only");
+        assert_eq!(error.kind, CaptureErrorKind::Usage);
+
+        let error = parse_capture_text("#", Some("Work"))
+            .expect_err("forced marker only");
+        assert_eq!(error.kind, CaptureErrorKind::Usage);
+    }
+
+    #[test]
+    fn formats_bullet_line() {
+        assert_eq!(
+            format_bullet_line("some idea", "2026-06-15"),
+            "- some idea [created::2026-06-15]"
+        );
+    }
+
+    #[test]
+    fn bullet_inserts_after_matched_section_header() {
+        let contents = "# Notes\n## Ideas\nNotes\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!("# Notes\n## Ideas\n\n{BULLET}\nNotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bullet_inserts_after_last_ordinary_bullet_block() {
+        let contents = "## Ideas\n- first\n  detail\n\n\tmore\nAfter\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!(
+                    "## Ideas\n- first\n  detail\n\n\tmore\n{BULLET}\nAfter\n"
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bullet_treats_checkbox_only_section_as_empty() {
+        let contents = "## Ideas\n- [ ] #task t\n- [x] done\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!("## Ideas\n\n{BULLET}\n- [ ] #task t\n- [x] done\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bullet_skips_tasks_section_matching_prefix() {
+        let contents = "## Tasks\n- [ ] #task t\n## Ta-da\nNotes\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ta")),
+            (
+                format!("## Tasks\n- [ ] #task t\n## Ta-da\n\n{BULLET}\nNotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bare_bullet_marker_selects_first_non_tasks_section() {
+        let contents = "## Tasks\n- [ ] #task t\n## Ideas\nNotes\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, None),
+            (
+                format!("## Tasks\n- [ ] #task t\n## Ideas\n\n{BULLET}\nNotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn unmatched_prefix_falls_back_to_zeroth_section() {
+        let contents = "Intro line\n## Tasks\n- [ ] #task t\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!("{BULLET}\nIntro line\n## Tasks\n- [ ] #task t\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn zeroth_section_insertion_after_frontmatter() {
+        let contents =
+            "---\ntype: area\n---\nIntro\n## Tasks\n- [ ] #task t\n";
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!(
+                    "---\ntype: area\n---\n{BULLET}\nIntro\n## Tasks\n- [ ] #task t\n"
+                ),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bullet_ignores_headings_in_frontmatter_and_fences() {
+        let contents = concat!(
+            "---\n",
+            "## Ideas\n",
+            "---\n",
+            "```md\n",
+            "## Ideas\n",
+            "```\n",
+            "## Ideas\n",
+            "Notes\n",
+        );
+        assert_eq!(
+            insert_bullet_line(contents, BULLET, Some("Ideas")),
+            (
+                format!(
+                    "---\n## Ideas\n---\n```md\n## Ideas\n```\n## Ideas\n\n{BULLET}\nNotes\n"
+                ),
+                Placement::Inserted,
+            )
+        );
     }
 }

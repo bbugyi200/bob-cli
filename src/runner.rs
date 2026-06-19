@@ -39,7 +39,7 @@ const SUBCOMMANDS: &[Subcommand] = &[
     Subcommand {
         name: "capture",
         script_command: None,
-        about: "Capture a task into the Bob vault",
+        about: "Capture a task or bullet into the Bob vault",
         native_command: NativeCommand::Capture,
     },
     Subcommand {

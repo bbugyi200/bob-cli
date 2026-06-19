@@ -938,6 +938,142 @@ fn capture_json_failure_prints_error_object() {
 }
 
 #[test]
+fn capture_routed_bullet_inserts_into_section_by_prefix() {
+    let temp = TempDir::new("bob-cli-capture-bullet-routed");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("foo.md"),
+        "# Foo\n## Ideas\n- existing idea\nTail\n",
+    );
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("Some")
+        .arg("bullet")
+        .arg("#Ideas")
+        .arg("@foo")
+        .env("BOB_NOW", "2026-06-15")
+        .output()
+        .expect("run routed bullet capture");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("captured  foo.md")
+            && stdout(&output)
+                .contains("- Some bullet [created::2026-06-15]"),
+        "unexpected bullet capture output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("foo.md")).expect("read foo"),
+        "# Foo\n## Ideas\n- existing idea\n- Some bullet [created::2026-06-15]\nTail\n"
+    );
+}
+
+#[test]
+fn capture_bullet_marker_order_routes_equivalently() {
+    let render = |args: &[&str]| -> String {
+        let temp = TempDir::new("bob-cli-capture-bullet-order");
+        let vault = temp.path().join("vault");
+        write_file(&vault.join("foo.md"), "## Ideas\n- existing\n");
+
+        let mut command = bob_command();
+        command.arg("capture").arg("-b").arg(&vault);
+        for arg in args {
+            command.arg(arg);
+        }
+        let output = command
+            .env("BOB_NOW", "2026-06-15")
+            .output()
+            .expect("run bullet capture");
+
+        assert_success(&output);
+        fs::read_to_string(vault.join("foo.md")).expect("read foo")
+    };
+
+    let route_first = render(&["Some", "bullet", "@foo", "#"]);
+    let marker_first = render(&["Some", "bullet", "#", "@foo"]);
+    assert_eq!(route_first, marker_first);
+    assert_eq!(
+        route_first,
+        "## Ideas\n- existing\n- Some bullet [created::2026-06-15]\n"
+    );
+}
+
+#[test]
+fn capture_bare_bullet_marker_selects_first_non_tasks_section_in_inbox() {
+    let temp = TempDir::new("bob-cli-capture-bullet-inbox");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("mac_inbox.md"),
+        "## Tasks\n- [ ] #task t\n## Ideas\nNotes\n",
+    );
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("jot")
+        .arg("this")
+        .arg("#")
+        .env("BOB_NOW", "2026-06-15")
+        .output()
+        .expect("run bare bullet capture");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("captured  mac_inbox.md"),
+        "unexpected bullet capture output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("mac_inbox.md")).expect("read inbox"),
+        "## Tasks\n- [ ] #task t\n## Ideas\n\n- jot this [created::2026-06-15]\nNotes\n"
+    );
+}
+
+#[test]
+fn capture_bullet_json_reports_rendered_line() {
+    let temp = TempDir::new("bob-cli-capture-bullet-json");
+    let vault = temp.path().join("vault");
+    write_file(&vault.join("foo.md"), "## Ideas\n- existing\n");
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-f")
+        .arg("json")
+        .arg("Some")
+        .arg("bullet")
+        .arg("#Ideas")
+        .arg("@foo")
+        .env("BOB_NOW", "2026-06-15")
+        .output()
+        .expect("run json bullet capture");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "json bullet capture should keep stderr clean:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["routed"], true);
+    assert_eq!(json["route"], "foo");
+    assert_eq!(json["kind"], "bullet");
+    assert_eq!(json["text"], "Some bullet");
+    assert_eq!(json["task_line"], "- Some bullet [created::2026-06-15]");
+    assert_eq!(json["placement"], "inserted");
+}
+
+#[test]
 fn capture_targets_json_lists_picker_targets_in_order() {
     let temp = TempDir::new("bob-cli-capture-targets-json");
     let vault = temp.path().join("vault");

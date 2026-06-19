@@ -78,6 +78,17 @@ the `Tasks` heading when the section has no tasks yet. Files without a `Tasks`
 section keep the older fallback of inserting after the last top-level `#task`
 block and its indented continuation lines, or appending at EOF.
 
+A terminal `#` or `#<section-prefix>` marker captures an ordinary Markdown
+bullet instead of a task. It renders as `- <text> [created::YYYY-MM-DD]` and is
+placed in the first non-`Tasks` section whose heading title starts with the
+prefix, or the first non-`Tasks` section when the marker is a bare `#`. If no
+heading matches, the bullet goes into the pre-heading (zeroth) section. Within
+the chosen section the bullet is inserted after the last existing top-level
+bullet, otherwise just below the heading (or after any YAML frontmatter for the
+zeroth section). A terminal `@route` and the `#` marker may appear in either
+order, so `note @foo #` and `note # @foo` both capture into `foo.md`. A
+`--route` target keeps `@tokens` literal but still honors the `#` marker.
+
 Useful options:
 
 - `-b, --bob-dir DIR`: Bob vault root; defaults to `BOB_DIR` or `~/bob`
@@ -90,9 +101,10 @@ stdin. Put options before text, or use `--` when the task itself starts with a
 hyphen. Hammerspoon integrations should call
 `bob capture --format json -- <text>` and parse the JSON object, whose stable
 fields include `ok`, `dry_run`, `routed`, `route`, `route_label`,
-`relative_target`, `target`, `text`, `task_line`, `created`, and `placement`.
-On JSON-mode failures, stdout is still a single object with `ok: false` and an
-`error` string.
+`relative_target`, `target`, `text`, `task_line`, `kind`, `created`, and
+`placement`. The `kind` field is `"task"` or `"bullet"`, and `task_line` holds
+the rendered line for either kind. On JSON-mode failures, stdout is still a
+single object with `ok: false` and an `error` string.
 
 ```bash
 bob nightly
