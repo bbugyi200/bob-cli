@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 08:25:14
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_open_task_zz_center.md
 ---
 # Plan: Center Ctrl+Shift+J/K Open-Task Jumps Like Vim zz
