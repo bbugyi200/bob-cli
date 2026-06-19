@@ -1,7 +1,7 @@
 ---
 title: Obsidian Task Toggle Next-Section Routing
 create_time: 2026-06-19 07:51:28
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_task_toggle_next_section.md
 ---
 
