@@ -78,18 +78,21 @@ the `Tasks` heading when the section has no tasks yet. Files without a `Tasks`
 section keep the older fallback of inserting after the last top-level `#task`
 block and its indented continuation lines, or appending at EOF.
 
-A terminal `#` or `#<section-prefix>` marker captures an ordinary Markdown
-bullet instead of a task. It renders as `- <text> [created::YYYY-MM-DD]` and is
-placed in a non-`Tasks` section whose heading title starts with the prefix
-(compared case insensitively), or any non-`Tasks` section when the marker is a
-bare `#`. A matching non-H1 section is preferred; a matching H1 heading is used
-only when no non-H1 heading matches. If no heading matches, the bullet goes
-into the pre-heading (zeroth) section. Within
-the chosen section the bullet is inserted after the last existing top-level
-bullet, otherwise just below the heading (or after any YAML frontmatter for the
-zeroth section). A terminal `@route` and the `#` marker may appear in either
-order, so `note @foo #` and `note # @foo` both capture into `foo.md`. A
-`--route` target keeps `@tokens` literal but still honors the `#` marker.
+Append `#<section-prefix>` or a bare `#` to an `@route` token, as in
+`@notes#Ideas` or `@notes#`, to capture an ordinary Markdown bullet instead of
+a task. It renders as `- <text> [created::YYYY-MM-DD]` and is placed in a
+non-`Tasks` section whose heading title starts with the prefix (compared case
+insensitively), or any non-`Tasks` section when the marker is a bare `#`. A
+matching non-H1 section is preferred; a matching H1 heading is used only when no
+non-H1 heading matches. If no heading matches, the bullet goes into the
+pre-heading (zeroth) section. Within the chosen section the bullet is inserted
+after the last existing top-level bullet, otherwise just below the heading (or
+after any YAML frontmatter for the zeroth section). The suffixed route token may
+lead or trail the body, so `@notes#Ideas jot idea` and `jot idea @notes#Ideas`
+both capture into `notes.md`. Standalone terminal `#...` markers, such as
+`note #Ideas @foo` or `note @foo #`, are no longer accepted and fail with a
+usage error. A `--route` target keeps `@tokens` literal and, because bullet
+markers must ride an `@route` token, never captures a bullet.
 
 Useful options:
 

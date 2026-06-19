@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 14:17:38
-status: wip
+status: done
 prompt: sdd/prompts/202606/capture_embedded_bullet_marker.md
 ---
 # Plan: Require Bullet Markers On Capture Route Tokens

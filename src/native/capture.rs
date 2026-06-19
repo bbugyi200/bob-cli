@@ -62,16 +62,18 @@ Text is normalized to one line, formatted as a #task with a [created::] stamp, \
 and written to mac_inbox.md unless an @route token or --route target is \
 provided. Existing target files prefer a Tasks section, then fall back to the \
 last top-level task block. Missing target files are created when needed.\n\n\
-A terminal '#' or '#<section-prefix>' marker captures an ordinary bullet \
-instead. It renders as '- <body> [created::YYYY-MM-DD]' and is placed in a \
-non-Tasks section whose heading title starts with the prefix (compared case \
-insensitively), or any non-Tasks section for a bare '#'. A matching non-H1 \
-section is preferred; a matching H1 heading is used only when no non-H1 \
-heading matches. A terminal @route and the '#' marker may appear in either \
-order.",
+Append '#<section-prefix>' or a bare '#' to an @route token (such as \
+'@notes#Ideas' or '@notes#') to capture an ordinary bullet instead. It renders \
+as '- <body> [created::YYYY-MM-DD]' and is placed in a non-Tasks section whose \
+heading title starts with the prefix (compared case insensitively), or any \
+non-Tasks section for a bare '#'. A matching non-H1 section is preferred; a \
+matching H1 heading is used only when no non-H1 heading matches. The marker may \
+lead ('@notes#Ideas jot idea') or trail ('jot idea @notes#Ideas') the body. \
+Standalone terminal '#...' markers are no longer accepted and fail with a \
+usage error.",
         )
         .after_help(
-            "Examples:\n  bob capture buy milk @groceries\n  bob capture jot idea #Ideas @notes\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
+            "Examples:\n  bob capture buy milk @groceries\n  bob capture jot idea @notes#Ideas\n  bob capture @notes#Ideas jot idea\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
         )
         .disable_help_flag(true)
         .arg(bob_dir_arg())
@@ -340,15 +342,28 @@ struct ParsedCaptureText {
     kind: CaptureKind,
 }
 
-/// Terminal control tokens stripped from the end of a normalized capture.
+/// A parsed `@route` token, optionally carrying a bullet marker.
 ///
-/// `bullet` is the bullet marker: the outer `Option` records whether a terminal
-/// `#...` marker was present, and the inner `Option<String>` records its section
-/// prefix (`None` for a bare `#`).
-struct TerminalControls {
-    body: String,
+/// `bullet` records the token's `#` suffix: `None` means a plain route
+/// (`@foo`), `Some(None)` a bare bullet marker (`@foo#`), and
+/// `Some(Some(prefix))` a bullet marker with a section prefix (`@foo#bar`).
+struct RouteToken {
+    route: String,
     bullet: Option<Option<String>>,
-    route: Option<String>,
+}
+
+impl RouteToken {
+    fn into_parsed(self, body: String) -> ParsedCaptureText {
+        let kind = match self.bullet {
+            Some(section_prefix) => CaptureKind::Bullet { section_prefix },
+            None => CaptureKind::Task,
+        };
+        ParsedCaptureText {
+            body,
+            route: Some(self.route),
+            kind,
+        }
+    }
 }
 
 fn parse_capture_text(
@@ -360,44 +375,47 @@ fn parse_capture_text(
         return Err(missing_text_error());
     }
 
-    let controls =
-        peel_terminal_controls(&normalized, forced_route.is_none());
+    let tokens: Vec<&str> = normalized.split(' ').collect();
 
     if let Some(route) = forced_route {
         let route = normalize_forced_route(route)?;
-        let Some(section_prefix) = controls.bullet else {
-            return Ok(ParsedCaptureText {
-                body: normalized,
-                route: Some(route),
-                kind: CaptureKind::Task,
-            });
-        };
-        if controls.body.is_empty() {
-            return Err(missing_text_error());
-        }
+        reject_legacy_bullet_markers(&tokens, false)?;
         return Ok(ParsedCaptureText {
-            body: controls.body,
+            body: normalized,
             route: Some(route),
-            kind: CaptureKind::Bullet { section_prefix },
+            kind: CaptureKind::Task,
         });
     }
 
-    let Some(section_prefix) = controls.bullet else {
-        return Ok(parse_auto_route(&normalized));
-    };
+    reject_legacy_bullet_markers(&tokens, true)?;
 
-    if controls.body.is_empty() {
-        return Err(missing_text_error());
+    // Leading route wins: when the first token is a route token followed by
+    // body text, route by it and do not inspect later route-looking tokens.
+    if let Some(token) = parse_route_token(tokens[0]) {
+        let body = tokens[1..].join(" ");
+        if body.is_empty() {
+            // `@foo#bar`/`@foo#` clearly request a routed bullet with no body.
+            if token.bullet.is_some() {
+                return Err(missing_text_error());
+            }
+            // A bare `@foo` with no body stays literal task text.
+        } else {
+            return Ok(token.into_parsed(body));
+        }
     }
 
-    let (body, route) = match controls.route {
-        Some(route) => (controls.body, Some(route)),
-        None => parse_leading_route(&controls.body),
-    };
+    // Otherwise a trailing route token routes the body that precedes it.
+    if let Some((&last, rest)) = tokens.split_last()
+        && !rest.is_empty()
+        && let Some(token) = parse_route_token(last)
+    {
+        return Ok(token.into_parsed(rest.join(" ")));
+    }
+
     Ok(ParsedCaptureText {
-        body,
-        route,
-        kind: CaptureKind::Bullet { section_prefix },
+        body: normalized,
+        route: None,
+        kind: CaptureKind::Task,
     })
 }
 
@@ -407,83 +425,63 @@ fn missing_text_error() -> CaptureError {
     )
 }
 
+fn legacy_marker_error() -> CaptureError {
+    CaptureError::usage(
+        "bullet section markers must be appended to an @route token; use \
+@foo#bar instead of #bar @foo",
+    )
+}
+
 fn normalize_task_text(raw_text: &str) -> String {
     raw_text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Peel a terminal bullet marker and (when `allow_route`) a terminal `@route`
-/// token off `normalized`, in either order, consuming at most one of each.
-fn peel_terminal_controls(
-    normalized: &str,
-    allow_route: bool,
-) -> TerminalControls {
-    let mut tokens: Vec<&str> = normalized.split(' ').collect();
-    let mut bullet: Option<Option<String>> = None;
-    let mut route: Option<String> = None;
-
-    while let Some(&last) = tokens.last() {
-        if bullet.is_none()
-            && let Some(rest) = last.strip_prefix('#')
-        {
-            bullet = Some((!rest.is_empty()).then(|| rest.to_string()));
-            tokens.pop();
-            continue;
+/// Parse one whitespace-free token as an `@route` token, returning `None` when
+/// it does not begin with `@` or its route part is not a valid route name. A
+/// `#` suffix selects bullet mode and is split off before route validation.
+fn parse_route_token(token: &str) -> Option<RouteToken> {
+    let rest = token.strip_prefix('@')?;
+    let (route_part, bullet) = match rest.split_once('#') {
+        Some((route, prefix)) => {
+            let marker = (!prefix.is_empty()).then(|| prefix.to_string());
+            (route, Some(marker))
         }
-
-        if allow_route
-            && route.is_none()
-            && let Some(token) = last.strip_prefix('@')
-            && is_route_token(token)
-        {
-            route = Some(token.to_ascii_lowercase());
-            tokens.pop();
-            continue;
-        }
-
-        break;
-    }
-
-    TerminalControls {
-        body: tokens.join(" "),
-        bullet,
-        route,
-    }
-}
-
-fn parse_auto_route(text: &str) -> ParsedCaptureText {
-    let (body, route) = match parse_leading_route(text) {
-        (body, Some(route)) => (body, Some(route)),
-        (_, None) => parse_trailing_route(text),
+        None => (rest, None),
     };
-    ParsedCaptureText {
-        body,
-        route,
-        kind: CaptureKind::Task,
-    }
+    is_route_token(route_part).then(|| RouteToken {
+        route: route_part.to_ascii_lowercase(),
+        bullet,
+    })
 }
 
-fn parse_leading_route(text: &str) -> (String, Option<String>) {
-    if let Some(rest) = text.strip_prefix('@')
-        && let Some((token, body)) = rest.split_once(' ')
-        && is_route_token(token)
-        && !body.is_empty()
+/// Reject the retired standalone bullet marker forms so they fail clearly
+/// instead of silently capturing literal `#...` text. The marker is honored
+/// only when appended to an `@route` token (`@foo#bar`).
+///
+/// Two terminal positions are rejected: a final token that itself starts with
+/// `#`, and (when `allow_route`) a final plain `@route` token preceded by a
+/// `#...` token. A `#tag` anywhere else stays literal task text.
+fn reject_legacy_bullet_markers(
+    tokens: &[&str],
+    allow_route: bool,
+) -> Result<(), CaptureError> {
+    let Some(&last) = tokens.last() else {
+        return Ok(());
+    };
+
+    if last.starts_with('#') {
+        return Err(legacy_marker_error());
+    }
+
+    if allow_route
+        && tokens.len() >= 2
+        && tokens[tokens.len() - 2].starts_with('#')
+        && parse_route_token(last).is_some_and(|token| token.bullet.is_none())
     {
-        return (body.to_string(), Some(token.to_ascii_lowercase()));
+        return Err(legacy_marker_error());
     }
 
-    (text.to_string(), None)
-}
-
-fn parse_trailing_route(text: &str) -> (String, Option<String>) {
-    if let Some(index) = text.rfind(" @") {
-        let body = &text[..index];
-        let token = &text[index + 2..];
-        if !body.is_empty() && is_route_token(token) {
-            return (body.to_string(), Some(token.to_ascii_lowercase()));
-        }
-    }
-
-    (text.to_string(), None)
+    Ok(())
 }
 
 fn normalize_forced_route(route: &str) -> Result<String, CaptureError> {
@@ -1420,76 +1418,94 @@ mod tests {
     }
 
     #[test]
-    fn parses_bullet_marker_with_section_prefix() {
-        let parsed =
-            parse_capture_text("Some bullet #Ideas", None).expect("parse");
-        assert_eq!(parsed.body, "Some bullet");
-        assert_eq!(parsed.route, None);
-        assert_eq!(
-            parsed.kind,
-            CaptureKind::Bullet {
-                section_prefix: Some("Ideas".to_string())
-            }
-        );
+    fn parses_suffixed_route_token_as_bullet() {
+        let cases = [
+            (
+                "Some note @foo#bar",
+                "Some note",
+                "foo",
+                Some("bar"),
+                "trailing route with section prefix",
+            ),
+            (
+                "@foo#bar Some note",
+                "Some note",
+                "foo",
+                Some("bar"),
+                "leading route with section prefix",
+            ),
+            (
+                "Some note @foo#",
+                "Some note",
+                "foo",
+                None,
+                "trailing bare bullet marker",
+            ),
+            (
+                "@foo# Some note",
+                "Some note",
+                "foo",
+                None,
+                "leading bare bullet marker",
+            ),
+            (
+                "Some note @Foo-Bar#R",
+                "Some note",
+                "foo-bar",
+                Some("R"),
+                "route lower-cases and prefix is preserved",
+            ),
+        ];
+
+        for (raw, body, route, prefix, label) in cases {
+            let parsed = parse_capture_text(raw, None)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert_eq!(parsed.body, body, "{label}");
+            assert_eq!(parsed.route.as_deref(), Some(route), "{label}");
+            assert_eq!(
+                parsed.kind,
+                CaptureKind::Bullet {
+                    section_prefix: prefix.map(str::to_string)
+                },
+                "{label}"
+            );
+        }
     }
 
     #[test]
-    fn parses_bare_bullet_marker() {
-        let parsed = parse_capture_text("Some bullet #", None).expect("parse");
-        assert_eq!(parsed.body, "Some bullet");
-        assert_eq!(parsed.route, None);
-        assert_eq!(
-            parsed.kind,
-            CaptureKind::Bullet {
-                section_prefix: None
-            }
-        );
+    fn suffixed_route_token_without_body_is_usage_error() {
+        for raw in ["@foo#bar", "@foo#"] {
+            let error = parse_capture_text(raw, None)
+                .expect_err(&format!("{raw} should require body"));
+            assert_eq!(error.kind, CaptureErrorKind::Usage, "{raw}");
+        }
     }
 
     #[test]
-    fn terminal_marker_order_is_equivalent() {
-        let leading_route =
-            parse_capture_text("Some bullet @foo #", None).expect("parse");
-        let trailing_route =
-            parse_capture_text("Some bullet # @foo", None).expect("parse");
-        assert_eq!(leading_route, trailing_route);
-        assert_eq!(leading_route.body, "Some bullet");
-        assert_eq!(leading_route.route.as_deref(), Some("foo"));
-        assert_eq!(
-            leading_route.kind,
-            CaptureKind::Bullet {
-                section_prefix: None
-            }
-        );
+    fn legacy_standalone_bullet_markers_are_rejected() {
+        for raw in [
+            "Some note #bar @foo",
+            "Some note @foo #bar",
+            "Some note #bar",
+            "Some note #",
+        ] {
+            let error = parse_capture_text(raw, None)
+                .expect_err(&format!("{raw} should be a usage error"));
+            assert_eq!(error.kind, CaptureErrorKind::Usage, "{raw}");
+        }
     }
 
     #[test]
-    fn bullet_marker_keeps_leading_route_when_no_terminal_route() {
-        let parsed =
-            parse_capture_text("@work Some bullet #Ideas", None).expect("parse");
-        assert_eq!(parsed.body, "Some bullet");
+    fn forced_route_rejects_terminal_marker_but_keeps_middle_hashtag() {
+        let error = parse_capture_text("Some note #bar", Some("Work"))
+            .expect_err("forced terminal marker must fail");
+        assert_eq!(error.kind, CaptureErrorKind::Usage);
+
+        let parsed = parse_capture_text("Some #tag note", Some("Work"))
+            .expect("middle hashtag stays literal");
+        assert_eq!(parsed.body, "Some #tag note");
         assert_eq!(parsed.route.as_deref(), Some("work"));
-        assert_eq!(
-            parsed.kind,
-            CaptureKind::Bullet {
-                section_prefix: Some("Ideas".to_string())
-            }
-        );
-    }
-
-    #[test]
-    fn forced_route_keeps_tokens_literal_but_consumes_bullet_marker() {
-        let parsed =
-            parse_capture_text("buy milk @groceries #Ideas", Some("Work"))
-                .expect("parse");
-        assert_eq!(parsed.body, "buy milk @groceries");
-        assert_eq!(parsed.route.as_deref(), Some("work"));
-        assert_eq!(
-            parsed.kind,
-            CaptureKind::Bullet {
-                section_prefix: Some("Ideas".to_string())
-            }
-        );
+        assert_eq!(parsed.kind, CaptureKind::Task);
     }
 
     #[test]
