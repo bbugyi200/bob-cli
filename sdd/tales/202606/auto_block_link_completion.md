@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 08:44:21
-status: wip
+status: done
 prompt: sdd/prompts/202606/auto_block_link_completion.md
 ---
 # Auto Block Link Completion Plan
