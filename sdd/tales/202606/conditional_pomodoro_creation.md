@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 07:52:49
-status: wip
+status: done
 prompt: sdd/prompts/202606/conditional_pomodoro_creation.md
 ---
 # Conditional Pomodoro Creation Plan
