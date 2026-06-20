@@ -1,7 +1,7 @@
 sdd:
   version_controlled: true
 
-sibling_repos:
+linked_repos:
   - name: bob-plugins
     path: ~/projects/github/bobs-org/bob-plugins
     description: |
