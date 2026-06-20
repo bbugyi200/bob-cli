@@ -15,6 +15,16 @@ pub fn bob_dir() -> PathBuf {
         .unwrap_or_else(|| home_dir().join("bob"))
 }
 
+pub fn plugins_dir() -> PathBuf {
+    env::var_os("BOB_PLUGINS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| expand_tilde(&path))
+        .unwrap_or_else(|| {
+            home_dir().join("projects/github/bbugyi200/bob-plugins")
+        })
+}
+
 pub fn home_dir() -> PathBuf {
     env::var_os("HOME")
         .filter(|value| !value.is_empty())

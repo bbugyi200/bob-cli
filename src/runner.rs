@@ -79,6 +79,12 @@ const SUBCOMMANDS: &[Subcommand] = &[
         native_command: NativeCommand::Notify,
     },
     Subcommand {
+        name: "plugins",
+        script_command: None,
+        about: "List Bob Obsidian plugins and their vault sync state",
+        native_command: NativeCommand::Plugins,
+    },
+    Subcommand {
         name: "pomodoro",
         script_command: Some("bob_pomodoro"),
         about: "Show the current Pomodoro status",
@@ -243,6 +249,7 @@ Examples:
   bob move-done-tasks --threshold 10
                                  Move tasks and maintain done links
   bob nightly                    Run the nightly sync and maintenance steps
+  bob plugins list               List Bob plugins and their vault sync state
   bob pomodoro                   Show today's Pomodoro status
   bob projects list              List project notes and ^prj task states
 

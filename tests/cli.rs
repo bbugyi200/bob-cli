@@ -273,6 +273,7 @@ fn all_top_level_subcommand_help_is_safe_and_plain() {
         (&["move-done-tasks", "--help"], "usage: bob move-done-tasks"),
         (&["nightly", "--help"], "usage: bob nightly"),
         (&["notify", "--help"], "Notify me when"),
+        (&["plugins", "--help"], "bob plugins"),
         (&["pomodoro", "--help"], "usage: bob pomodoro"),
         (&["projects", "--help"], "bob projects"),
         (&["tmux-pomodoro", "--help"], "usage: bob tmux-pomodoro"),
@@ -323,6 +324,8 @@ fn public_help_surfaces_do_not_list_long_only_options() {
         (&["move-done-tasks", "--help"], "bob move-done-tasks --help"),
         (&["nightly", "--help"], "bob nightly --help"),
         (&["notify", "--help"], "bob notify --help"),
+        (&["plugins", "--help"], "bob plugins --help"),
+        (&["plugins", "list", "--help"], "bob plugins list --help"),
         (&["pomodoro", "--help"], "bob pomodoro --help"),
         (&["projects", "--help"], "bob projects --help"),
         (&["projects", "list", "--help"], "bob projects list --help"),
@@ -3481,6 +3484,200 @@ fn projects_sync_reports_prj_errors_without_aborting_scan() {
     assert_eq!(
         fs::read_to_string(vault.join("Good.md")).expect("read good"),
         "---\ntype: [[project]]\nstatus: done\n---\n- [x] #task Good project #hide ^prj\n"
+    );
+}
+
+#[test]
+fn plugins_help_lists_subcommand_and_options() {
+    let output = bob_command()
+        .arg("plugins")
+        .arg("--help")
+        .output()
+        .expect("run bob plugins --help");
+
+    assert_success(&output);
+    let help = stdout(&output);
+    assert!(
+        help.contains("Manage Bryan's custom Bob Obsidian plugins")
+            && help.contains("\n  list "),
+        "expected plugins help to describe the list subcommand:\n{help}"
+    );
+    assert_stdout_has_no_ansi(&output);
+
+    let output = bob_command()
+        .arg("plugins")
+        .arg("list")
+        .arg("--help")
+        .output()
+        .expect("run bob plugins list --help");
+
+    assert_success(&output);
+    let help = stdout(&output);
+    assert!(
+        help.contains("-b, --bob-dir")
+            && help.contains("-f, --format")
+            && help.contains("-r, --repo"),
+        "expected list short and long options:\n{help}"
+    );
+    assert_text_order(&help, &["-b, --bob-dir", "-f, --format", "-r, --repo"]);
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
+fn plugins_list_renders_table_and_summary() {
+    let temp = TempDir::new("bob-cli-plugins-list");
+    let repo = temp.path().join("repo");
+    let vault = temp.path().join("vault");
+    write_plugins_fixture(&repo, &vault);
+
+    let output = bob_command()
+        .arg("plugins")
+        .arg("list")
+        .arg("-r")
+        .arg(&repo)
+        .arg("-b")
+        .arg(&vault)
+        .output()
+        .expect("run bob plugins list");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "unexpected stderr:\n{}",
+        stderr(&output)
+    );
+    assert_stdout_has_no_ansi(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("Bob Plugins - 3 - "),
+        "missing header line:\n{out}"
+    );
+    assert!(
+        out.contains("PLUGIN")
+            && out.contains("VERSION")
+            && out.contains("SYNC")
+            && out.contains("VAULT")
+            && out.contains("DESCRIPTION"),
+        "missing table header:\n{out}"
+    );
+    assert!(
+        out.contains("alpha")
+            && out.contains("synced")
+            && out.contains("enabled"),
+        "missing synced + enabled alpha row:\n{out}"
+    );
+    assert!(
+        out.contains("beta")
+            && out.contains("drift")
+            && out.contains("disabled"),
+        "missing drift + disabled beta row:\n{out}"
+    );
+    assert!(
+        out.contains("gamma")
+            && out.contains("missing")
+            && out.contains("not installed"),
+        "missing not-installed gamma row:\n{out}"
+    );
+    assert!(
+        out.contains("1 synced - 1 drift - 1 not installed"),
+        "unexpected footer summary:\n{out}"
+    );
+    assert_text_order(&out, &["alpha", "beta", "gamma"]);
+}
+
+#[test]
+fn plugins_default_subcommand_runs_list() {
+    let temp = TempDir::new("bob-cli-plugins-default");
+    let repo = temp.path().join("repo");
+    let vault = temp.path().join("vault");
+    write_plugins_fixture(&repo, &vault);
+
+    let output = bob_command()
+        .arg("plugins")
+        .arg("-r")
+        .arg(&repo)
+        .arg("-b")
+        .arg(&vault)
+        .output()
+        .expect("run bob plugins with no subcommand");
+
+    assert_success(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("Bob Plugins - 3 - ")
+            && out.contains("1 synced - 1 drift - 1 not installed"),
+        "bare `bob plugins` should default to list:\n{out}"
+    );
+}
+
+#[test]
+fn plugins_list_json_is_machine_readable() {
+    let temp = TempDir::new("bob-cli-plugins-json");
+    let repo = temp.path().join("repo");
+    let vault = temp.path().join("vault");
+    write_plugins_fixture(&repo, &vault);
+
+    let output = bob_command()
+        .arg("plugins")
+        .arg("list")
+        .arg("-r")
+        .arg(&repo)
+        .arg("-b")
+        .arg(&vault)
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob plugins list -f json");
+
+    assert_success(&output);
+    assert_stdout_has_no_ansi(&output);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("parse plugins json");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["count"], 3);
+    assert_eq!(value["synced"], 1);
+    assert_eq!(value["drift"], 1);
+    assert_eq!(value["not_installed"], 1);
+    assert_eq!(value["plugins"][0]["id"], "alpha");
+    assert_eq!(value["plugins"][0]["version"], "1.0.0");
+    assert_eq!(value["plugins"][0]["sync"], "synced");
+    assert_eq!(value["plugins"][0]["vault"], "enabled");
+    assert_eq!(value["plugins"][1]["id"], "beta");
+    assert_eq!(value["plugins"][1]["sync"], "drift");
+    assert_eq!(value["plugins"][1]["vault"], "disabled");
+    assert_eq!(value["plugins"][2]["id"], "gamma");
+    assert_eq!(value["plugins"][2]["sync"], "missing");
+    assert_eq!(value["plugins"][2]["vault"], "not_installed");
+}
+
+#[test]
+fn plugins_list_unreadable_repo_reports_error() {
+    let temp = TempDir::new("bob-cli-plugins-missing");
+    let output = bob_command()
+        .arg("plugins")
+        .arg("list")
+        .arg("-r")
+        .arg(temp.path().join("does-not-exist"))
+        .arg("-b")
+        .arg(temp.path())
+        .output()
+        .expect("run bob plugins list with missing repo");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unreadable repo should exit 1:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stdout(&output).contains("Bob Plugins - 0 - "),
+        "expected an empty table header:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("failed to read plugins directory"),
+        "expected a repo read error on stderr:\n{}",
+        stderr(&output)
     );
 }
 
@@ -9755,6 +9952,43 @@ fn write_file(path: &Path, contents: &str) {
     }
     fs::write(path, contents)
         .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+}
+
+/// Writes a three-plugin repo and matching vault exercising every state:
+/// `alpha` is synced and enabled, `beta` drifts and is disabled, and `gamma`
+/// is absent from the vault (not installed).
+fn write_plugins_fixture(repo: &Path, vault: &Path) {
+    let write_plugin = |dir: &Path, id: &str, version: &str, body: &str| {
+        write_file(
+            &dir.join("manifest.json"),
+            &format!(
+                "{{\n  \"id\": \"{id}\",\n  \"version\": \"{version}\",\n  \"description\": \"{id} keeps things tidy\"\n}}\n"
+            ),
+        );
+        write_file(&dir.join("main.js"), &format!("// {body}\n"));
+    };
+
+    write_plugin(&repo.join("plugins/alpha"), "alpha", "1.0.0", "alpha");
+    write_plugin(&repo.join("plugins/beta"), "beta", "2.0.0", "beta");
+    write_plugin(&repo.join("plugins/gamma"), "gamma", "1.5.0", "gamma");
+
+    // alpha matches the repo byte-for-byte; beta's main.js diverges.
+    write_plugin(
+        &vault.join(".obsidian/plugins/alpha"),
+        "alpha",
+        "1.0.0",
+        "alpha",
+    );
+    write_plugin(
+        &vault.join(".obsidian/plugins/beta"),
+        "beta",
+        "2.0.0",
+        "beta-stale",
+    );
+    write_file(
+        &vault.join(".obsidian/community-plugins.json"),
+        "[\"alpha\"]\n",
+    );
 }
 
 fn write_executable(path: &Path, contents: &str) {

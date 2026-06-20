@@ -200,6 +200,32 @@ get `[scheduled::YYYY-mm-dd]` appended to the open `^prj` task. Use
 The full project task contract lives in [`docs/projects.md`](docs/projects.md).
 
 ```bash
+bob plugins [-b|--bob-dir DIR] [-f|--format table|json] [-r|--repo DIR]
+bob plugins list [-b|--bob-dir DIR] [-f|--format table|json] [-r|--repo DIR]
+```
+
+Lists Bryan's custom Bob Obsidian plugins from the
+[`bbugyi200/bob-plugins`](https://github.com/bbugyi200/bob-plugins) repo and
+annotates each with live vault state. Running `bob plugins` with no subcommand
+runs `list`. The read-only table reads every `<repo>/plugins/<id>/manifest.json`
+for the plugin id, version, and description; byte-compares the managed files
+(`manifest.json`, `main.js`, and `styles.css` when present) against the vault
+copy to report a `SYNC` state of `synced`, `drift`, or `missing`; and reads the
+vault's `community-plugins.json` to report a `VAULT` state of `enabled`,
+`disabled`, or `not installed`. A header names the repo and plugin count, and a
+footer summarizes `N synced · M drift · K not installed`.
+
+The repo root resolves from `-r, --repo`, then `BOB_PLUGINS_DIR`, then the
+default `~/projects/github/bbugyi200/bob-plugins`. The vault root resolves from
+`-b, --bob-dir`, then `BOB_DIR`, then `~/bob`. `list` exits non-zero only on a
+real error such as an unreadable repo; drift and not-installed plugins are
+reported, not failures. Pass `-f, --format json` for a stable object with `ok`,
+`repo`, `bob_dir`, `count`, `synced`, `drift`, `not_installed`, and a `plugins`
+array whose entries carry `id`, `version`, `description`, `sync`, and `vault`.
+
+The full command contract lives in [`docs/plugins.md`](docs/plugins.md).
+
+```bash
 bob highlights doctor
 bob highlights marker <pdf>
 bob highlights scan [-d|--dry-run] [-j|--jobs N] [-w|--write-pdfs]
