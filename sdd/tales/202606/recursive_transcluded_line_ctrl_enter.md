@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-20 15:30:15
-status: wip
+status: done
 prompt: sdd/prompts/202606/recursive_transcluded_line_ctrl_enter.md
 ---
 # Plan: Recursive Ctrl+Enter on Pomodoro Transcluded Task Lines
