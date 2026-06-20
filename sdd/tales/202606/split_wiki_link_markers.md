@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-19 21:15:16
-status: wip
+status: done
 prompt: sdd/prompts/202606/split_wiki_link_markers.md
 ---
 # Split Obsidian Wiki Link `^` and `@` Trigger Behavior
