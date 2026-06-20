@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-20 12:48:32
-status: wip
+status: done
 prompt: sdd/prompts/202606/update_github_org_refs.md
 ---
 # Plan: Update Bob GitHub Organization References

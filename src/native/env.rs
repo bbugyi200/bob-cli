@@ -21,7 +21,7 @@ pub fn plugins_dir() -> PathBuf {
         .map(PathBuf::from)
         .map(|path| expand_tilde(&path))
         .unwrap_or_else(|| {
-            home_dir().join("projects/github/bbugyi200/bob-plugins")
+            home_dir().join("projects/github/bobs-org/bob-plugins")
         })
 }
 

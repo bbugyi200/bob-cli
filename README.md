@@ -20,7 +20,7 @@ cargo install --path . --locked --force
 For installation from the Git remote:
 
 ```bash
-cargo install --git git@github.com:bbugyi200/bob-cli.git --locked --force bob-cli
+cargo install --git git@github.com:bobs-org/bob-cli.git --locked --force bob-cli
 ```
 
 To smoke-test an install without replacing an existing user install:
@@ -206,7 +206,7 @@ bob plugins sync [-b|--bob-dir DIR] [-d|--dry-run] [-F|--force] [-p|--plugin ID]
 ```
 
 Lists Bryan's custom Bob Obsidian plugins from the
-[`bbugyi200/bob-plugins`](https://github.com/bbugyi200/bob-plugins) repo and
+[`bobs-org/bob-plugins`](https://github.com/bobs-org/bob-plugins) repo and
 annotates each with live vault state. Running `bob plugins` with no subcommand
 runs `list`. The read-only table reads every `<repo>/plugins/<id>/manifest.json`
 for the plugin id, version, and description; byte-compares the managed files
@@ -217,7 +217,7 @@ vault's `community-plugins.json` to report a `VAULT` state of `enabled`,
 footer summarizes `N synced · M drift · K not installed`.
 
 The repo root resolves from `-r, --repo`, then `BOB_PLUGINS_DIR`, then the
-default `~/projects/github/bbugyi200/bob-plugins`. The vault root resolves from
+default `~/projects/github/bobs-org/bob-plugins`. The vault root resolves from
 `-b, --bob-dir`, then `BOB_DIR`, then `~/bob`. `list` exits non-zero only on a
 real error such as an unreadable repo; drift and not-installed plugins are
 reported, not failures. Pass `-f, --format json` for a stable object with `ok`,

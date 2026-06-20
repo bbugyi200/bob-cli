@@ -89,7 +89,7 @@ fn list_command() -> ClapCommand {
     ClapCommand::new("list")
         .about("List Bob plugins with repo version and vault sync state")
         .after_help(
-            "Examples:\n  bob plugins list\n  bob plugins list -f json\n  bob plugins list -b ~/bob -r ~/projects/github/bbugyi200/bob-plugins",
+            "Examples:\n  bob plugins list\n  bob plugins list -f json\n  bob plugins list -b ~/bob -r ~/projects/github/bobs-org/bob-plugins",
         )
         .arg(bob_dir_arg())
         .arg(format_arg())
@@ -110,7 +110,7 @@ clobbered silently. Files that already match the repo are reported as \
 unchanged.",
         )
         .after_help(
-            "Examples:\n  bob plugins sync --dry-run\n  bob plugins sync -p bob-project-tasks\n  bob plugins sync -F -b ~/bob -r ~/projects/github/bbugyi200/bob-plugins",
+            "Examples:\n  bob plugins sync --dry-run\n  bob plugins sync -p bob-project-tasks\n  bob plugins sync -F -b ~/bob -r ~/projects/github/bobs-org/bob-plugins",
         )
         .arg(bob_dir_arg())
         .arg(dry_run_arg())
@@ -146,7 +146,7 @@ fn repo_arg() -> Arg {
         .value_parser(OsStringValueParser::new())
         .help(
             "Plugins repo root; defaults to BOB_PLUGINS_DIR or \
-~/projects/github/bbugyi200/bob-plugins",
+~/projects/github/bobs-org/bob-plugins",
         )
 }
 

@@ -73,7 +73,7 @@ Then use this body structure:
 1. Keep the `bob_v1.md` top-level project completion task with `^prj`.
 2. Preserve the current `bob.md` heading and GitHub pointer as project context:
    - `# bob (Bugyi's [[obsidian]])`
-   - `See [bob-cli](https://github.com/bbugyi200/bob-cli) on GitHub for details on the \`bob\` CLI tool.`
+   - `See [bob-cli](https://github.com/bobs-org/bob-cli) on GitHub for details on the \`bob\` CLI tool.`
 3. Copy the `## Tasks` and `## Future Work` sections from `bob_v1.md`, preserving task status, task metadata, inline
    fields, indentation, and all block IDs.
 4. Rewrite the obsolete sub-bullet `Move tasks from [[bob]] to [[bob_v1]]!` to non-stale wording that does not create a

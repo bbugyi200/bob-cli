@@ -1,7 +1,7 @@
 # Bob Plugins
 
 `bob plugins` manages Bryan's custom Bob Obsidian plugins from the
-[`bbugyi200/bob-plugins`](https://github.com/bbugyi200/bob-plugins) repo, which
+[`bobs-org/bob-plugins`](https://github.com/bobs-org/bob-plugins) repo, which
 is the source of truth for the six plain-JavaScript community plugins. The repo
 holds one folder per plugin under `plugins/<id>/`, each with a `manifest.json`,
 a `main.js`, and an optional `styles.css`.
@@ -29,7 +29,7 @@ Two roots feed the report:
 
 - **Repo root.** Resolves from `-r, --repo`, then the `BOB_PLUGINS_DIR`
   environment variable, then the default
-  `~/projects/github/bbugyi200/bob-plugins`. Plugins live under
+  `~/projects/github/bobs-org/bob-plugins`. Plugins live under
   `<repo>/plugins/<id>/`.
 - **Vault root.** Resolves from `-b, --bob-dir`, then `BOB_DIR`, then `~/bob`.
   Installed plugins live under `<bob-dir>/.obsidian/plugins/<id>/`, and the
@@ -72,7 +72,7 @@ enabled" rather than an error, so installed plugins then read as `disabled`.
 ## Header and Footer
 
 The header names the repo and the plugin count, such as
-`Bob Plugins · 6 · /home/bryan/projects/github/bbugyi200/bob-plugins`. The
+`Bob Plugins · 6 · /home/bryan/projects/github/bobs-org/bob-plugins`. The
 footer summarizes the sync states, such as
 `6 synced · 0 drift · 0 not installed`. On a non-color or piped stream the
 separator renders as `-` and the colored state glyphs are dropped.
@@ -91,7 +91,7 @@ error to stderr.
 ```json
 {
   "ok": true,
-  "repo": "/home/bryan/projects/github/bbugyi200/bob-plugins",
+  "repo": "/home/bryan/projects/github/bobs-org/bob-plugins",
   "bob_dir": "/home/bryan/bob",
   "count": 6,
   "synced": 6,
@@ -159,8 +159,8 @@ copy, and writes the cause to stderr.
 bob plugins
 bob plugins list
 bob plugins list -f json
-bob plugins list -b ~/bob -r ~/projects/github/bbugyi200/bob-plugins
+bob plugins list -b ~/bob -r ~/projects/github/bobs-org/bob-plugins
 bob plugins sync --dry-run
 bob plugins sync -p bob-project-tasks
-bob plugins sync -F -b ~/bob -r ~/projects/github/bbugyi200/bob-plugins
+bob plugins sync -F -b ~/bob -r ~/projects/github/bobs-org/bob-plugins
 ```

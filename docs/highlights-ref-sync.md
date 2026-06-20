@@ -655,7 +655,7 @@ mkdir -p ~/projects
 if [ -d ~/projects/bob-cli/.git ]; then
   git -C ~/projects/bob-cli pull --ff-only
 else
-  git clone git@github.com:bbugyi200/bob-cli.git ~/projects/bob-cli
+  git clone git@github.com:bobs-org/bob-cli.git ~/projects/bob-cli
 fi
 cargo install --path ~/projects/bob-cli --locked --force
 bob highlights --help
