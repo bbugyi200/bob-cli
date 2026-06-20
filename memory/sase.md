@@ -16,7 +16,9 @@ these workspace directories, since they have their own isolated virtual environm
 Configured sibling repositories for this context:
 
 - `bob-plugins`: Source-of-truth monorepo for Bryan's custom Bob Obsidian plugins, deployed to the vault via `bob
-  plugins sync`.
+  plugins sync`. You should NOT edit these plugins directly in the ~/bob/ directory, as they will be overwritten on the
+  next sync. Instead, make changes to this sibling repo and, when done, run the `bob plugins sync` command to deploy
+  them to the ~/bob/ directory.
 
 When you need to make changes to files in a numbered-workspace sibling repository or need to review numbered-workspace
 sibling repository code, agents MUST run:
