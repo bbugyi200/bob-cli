@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-22 11:26:54
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_ctrl_bracket_nohlsearch.md
 ---
 # Plan: Make `<C-[>` Also Clear Obsidian Vim Search Highlight (Escape parity)
