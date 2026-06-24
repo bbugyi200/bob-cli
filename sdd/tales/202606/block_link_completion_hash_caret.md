@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-24 09:03:25
-status: wip
+status: done
 prompt: sdd/prompts/202606/block_link_completion_hash_caret.md
 ---
 # Plan: Complete block-link task picker links as `[[foo#^id]]`, not `[[foo^id]]`
