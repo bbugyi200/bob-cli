@@ -138,6 +138,30 @@ fn capture_help_is_native_only() {
 }
 
 #[test]
+fn capture_sections_help_is_native_only() {
+    let temp = TempDir::new("bob-cli-capture-sections-native-help");
+    let output = bob_command()
+        .arg("capture-sections")
+        .arg("--help")
+        .env("BOB_CLI_USE_SCRIPT", "1")
+        .env("XDG_CACHE_HOME", temp.path())
+        .output()
+        .expect("run native-only bob capture-sections --help");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("bob capture-sections"),
+        "expected capture-sections help text:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        !temp.path().join("bob-cli/scripts").exists(),
+        "native-only capture-sections should not extract script assets"
+    );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
 fn capture_targets_help_is_native_only() {
     let temp = TempDir::new("bob-cli-capture-targets-native-help");
     let output = bob_command()
@@ -267,6 +291,7 @@ fn all_top_level_subcommand_help_is_safe_and_plain() {
     let cases: &[(&[&str], &str)] = &[
         (&["bulk-git-commit", "--help"], "usage: bob bulk-git-commit"),
         (&["capture", "--help"], "bob capture"),
+        (&["capture-sections", "--help"], "bob capture-sections"),
         (&["capture-targets", "--help"], "bob capture-targets"),
         (&["dataview", "--help"], "bob dataview"),
         (&["highlights", "--help"], "Usage: bob highlights"),
@@ -302,6 +327,10 @@ fn public_help_surfaces_do_not_list_long_only_options() {
         (&["--help"], "bob --help"),
         (&["bulk-git-commit", "--help"], "bob bulk-git-commit --help"),
         (&["capture", "--help"], "bob capture --help"),
+        (
+            &["capture-sections", "--help"],
+            "bob capture-sections --help",
+        ),
         (&["capture-targets", "--help"], "bob capture-targets --help"),
         (&["dataview", "--help"], "bob dataview --help"),
         (&["highlights", "--help"], "bob highlights --help"),
@@ -551,7 +580,29 @@ fn capture_help_lists_options_alphabetically() {
             "-f, --format",
             "-h, --help",
             "-r, --route",
+            "-s, --section",
         ],
+    );
+    assert_stdout_has_no_ansi(&output);
+}
+
+#[test]
+fn capture_sections_help_lists_options_alphabetically() {
+    let output = bob_command()
+        .arg("capture-sections")
+        .arg("--help")
+        .output()
+        .expect("run bob capture-sections --help");
+
+    assert_success(&output);
+    let help = stdout(&output);
+    assert!(
+        help.contains("Missing notes are not errors"),
+        "expected capture-sections long help:\n{help}"
+    );
+    assert_text_order(
+        &help,
+        &["-b, --bob-dir", "-f, --format", "-h, --help", "-r, --route"],
     );
     assert_stdout_has_no_ansi(&output);
 }
@@ -964,8 +1015,7 @@ fn capture_routed_bullet_inserts_into_section_by_prefix() {
     assert_success(&output);
     assert!(
         stdout(&output).contains("captured  foo.md")
-            && stdout(&output)
-                .contains("- Some bullet [created::2026-06-15]"),
+            && stdout(&output).contains("- Some bullet [created::2026-06-15]"),
         "unexpected bullet capture output:\n{}",
         format_output(&output)
     );
@@ -998,8 +1048,7 @@ fn capture_leading_route_bullet_inserts_into_section_by_prefix() {
     assert_success(&output);
     assert!(
         stdout(&output).contains("captured  foo.md")
-            && stdout(&output)
-                .contains("- Some bullet [created::2026-06-15]"),
+            && stdout(&output).contains("- Some bullet [created::2026-06-15]"),
         "unexpected bullet capture output:\n{}",
         format_output(&output)
     );
@@ -1185,6 +1234,224 @@ fn capture_bullet_prefix_prefers_non_h1_and_ignores_prefix_case() {
     // A `#R` prefix selects the same section and produces identical contents.
     let uppercase = render("@foo#R");
     assert_eq!(lowercase, uppercase);
+}
+
+#[test]
+fn capture_forced_section_inserts_exact_bullet() {
+    let temp = TempDir::new("bob-cli-capture-forced-section");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("foo.md"),
+        "# Foo\n## Ideas\nnotes\n## Idea\nnotes\n",
+    );
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("--route")
+        .arg("foo")
+        .arg("--section")
+        .arg("Idea")
+        .arg("--")
+        .arg("Some")
+        .arg("bullet")
+        .arg("@bar")
+        .env("BOB_NOW", "2026-06-15")
+        .output()
+        .expect("run forced-section bullet capture");
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("captured  foo.md"),
+        "unexpected forced-section capture output:\n{}",
+        format_output(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(vault.join("foo.md")).expect("read foo"),
+        "# Foo\n## Ideas\nnotes\n## Idea\n\n- Some bullet @bar [created::2026-06-15]\nnotes\n"
+    );
+}
+
+#[test]
+fn capture_forced_section_requires_route() {
+    let temp = TempDir::new("bob-cli-capture-forced-section-route");
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(&vault).expect("create vault");
+
+    let output = bob_command()
+        .arg("capture")
+        .arg("-b")
+        .arg(&vault)
+        .arg("--section")
+        .arg("Ideas")
+        .arg("--")
+        .arg("Some")
+        .arg("bullet")
+        .output()
+        .expect("run forced-section without route");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--section without --route should be a usage error:\n{}",
+        format_output(&output)
+    );
+    assert!(
+        stderr(&output).contains("--section requires --route"),
+        "expected section route usage error:\n{}",
+        format_output(&output)
+    );
+}
+
+#[test]
+fn capture_sections_json_lists_sections_in_order() {
+    let temp = TempDir::new("bob-cli-capture-sections-json");
+    let vault = temp.path().join("vault");
+    write_file(
+        &vault.join("cash.md"),
+        concat!(
+            "---\n",
+            "## Ignored\n",
+            "---\n",
+            "# Cash\n",
+            "```md\n",
+            "## Ignored\n",
+            "```\n",
+            "## Tasks\n",
+            "### Ideas\n",
+            "###### Log\n",
+        ),
+    );
+
+    let output = bob_command()
+        .arg("capture-sections")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-r")
+        .arg("Cash")
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-sections json");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "capture-sections json should keep stderr clean:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["route"], "cash");
+    assert_eq!(json["count"], 3);
+    assert_eq!(json["sections"][0]["title"], "Cash");
+    assert_eq!(json["sections"][0]["level"], 1);
+    assert_eq!(json["sections"][1]["title"], "Ideas");
+    assert_eq!(json["sections"][1]["level"], 3);
+    assert_eq!(json["sections"][2]["title"], "Log");
+    assert_eq!(json["sections"][2]["level"], 6);
+}
+
+#[test]
+fn capture_sections_missing_note_returns_empty_json() {
+    let temp = TempDir::new("bob-cli-capture-sections-missing");
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(&vault).expect("create vault");
+
+    let output = bob_command()
+        .arg("capture-sections")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-r")
+        .arg("cash")
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-sections missing");
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).is_empty(),
+        "missing note should keep stderr clean:\n{}",
+        format_output(&output)
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| {
+            panic!("stdout should be JSON: {error}\n{}", format_output(&output))
+        });
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["route"], "cash");
+    assert_eq!(json["count"], 0);
+    assert_eq!(
+        json["sections"].as_array().expect("sections array").len(),
+        0
+    );
+}
+
+#[test]
+fn capture_sections_invalid_or_missing_route_errors_cleanly() {
+    let temp = TempDir::new("bob-cli-capture-sections-route-errors");
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(&vault).expect("create vault");
+
+    let missing = bob_command()
+        .arg("capture-sections")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-sections missing route");
+    assert_eq!(
+        missing.status.code(),
+        Some(2),
+        "missing route should be a usage error:\n{}",
+        format_output(&missing)
+    );
+    assert!(
+        stderr(&missing).is_empty(),
+        "json usage failure should keep stderr clean:\n{}",
+        format_output(&missing)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(stdout(&missing).trim()).expect("json error");
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("--route")),
+        "unexpected missing-route json: {json}"
+    );
+
+    let invalid = bob_command()
+        .arg("capture-sections")
+        .arg("-b")
+        .arg(&vault)
+        .arg("-r")
+        .arg("../bad")
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("run bob capture-sections invalid route");
+    assert_eq!(
+        invalid.status.code(),
+        Some(2),
+        "invalid route should be a usage error:\n{}",
+        format_output(&invalid)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(stdout(&invalid).trim()).expect("json error");
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("must contain only")),
+        "unexpected invalid-route json: {json}"
+    );
 }
 
 #[test]
@@ -9485,6 +9752,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     let order = [
         "bulk-git-commit",
         "capture",
+        "capture-sections",
         "capture-targets",
         "dataview",
         "highlights",
@@ -9511,6 +9779,7 @@ fn top_level_help_lists_commands_alphabetically_with_examples() {
     assert!(
         help.contains("Examples:")
             && help.contains("bob bulk-git-commit")
+            && help.contains("bob capture-sections --route cash --format json")
             && help.contains("bob capture-targets --format json")
             && help.contains("bob dataview --source '#project'")
             && help.contains("bob highlights scan --dry-run")

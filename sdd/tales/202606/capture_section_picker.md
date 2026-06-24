@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-24 08:20:32
-status: wip
+status: done
 prompt: sdd/prompts/202606/capture_section_picker.md
 ---
 # Plan: Section picker for trailing `#` capture marker

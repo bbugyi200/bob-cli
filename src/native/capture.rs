@@ -70,10 +70,14 @@ non-Tasks section for a bare '#'. A matching non-H1 section is preferred; a \
 matching H1 heading is used only when no non-H1 heading matches. The marker may \
 lead ('@notes#Ideas jot idea') or trail ('jot idea @notes#Ideas') the body. \
 Standalone terminal '#...' markers are no longer accepted and fail with a \
-usage error.",
+usage error.\n\n\
+Use --route with --section to force bullet mode while keeping @tokens literal. \
+The section title is matched exactly, case insensitively, against non-Tasks \
+headings; if no heading matches, the bullet falls back to the pre-heading \
+section.",
         )
         .after_help(
-            "Examples:\n  bob capture buy milk @groceries\n  bob capture jot idea @notes#Ideas\n  bob capture @notes#Ideas jot idea\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
+            "Examples:\n  bob capture buy milk @groceries\n  bob capture jot idea @notes#Ideas\n  bob capture --route notes --section Ideas -- jot idea\n  bob capture @notes#Ideas jot idea\n  echo 'buy milk @groceries' | bob capture\n  bob capture -f json -- @work send status",
         )
         .disable_help_flag(true)
         .arg(bob_dir_arg())
@@ -81,6 +85,7 @@ usage error.",
         .arg(format_arg())
         .arg(help_arg())
         .arg(route_arg())
+        .arg(section_arg())
         .arg(text_arg())
 }
 
@@ -127,6 +132,14 @@ fn route_arg() -> Arg {
         .help("Force the route to NAME.md and keep @tokens in text literal")
 }
 
+fn section_arg() -> Arg {
+    Arg::new("section")
+        .long("section")
+        .short('s')
+        .value_name("TITLE")
+        .help("Force a bullet into the exact section TITLE; requires --route")
+}
+
 fn text_arg() -> Arg {
     Arg::new("text")
         .value_name("TEXT")
@@ -161,18 +174,38 @@ struct CaptureRequest {
     bob_dir: PathBuf,
     dry_run: bool,
     forced_route: Option<String>,
+    forced_section: Option<String>,
     raw_text: String,
 }
 
 impl CaptureRequest {
     fn from_matches(matches: &ArgMatches) -> Result<Self, CaptureError> {
+        let forced_route = matches.get_one::<String>("route").cloned();
+        let forced_section = forced_section_from_matches(matches)?;
+        if forced_section.is_some() && forced_route.is_none() {
+            return Err(CaptureError::usage("--section requires --route"));
+        }
+
         Ok(Self {
             bob_dir: bob_dir_from_matches(matches),
             dry_run: matches.get_flag("dry-run"),
-            forced_route: matches.get_one::<String>("route").cloned(),
+            forced_route,
+            forced_section,
             raw_text: raw_text_from_matches(matches)?,
         })
     }
+}
+
+fn forced_section_from_matches(
+    matches: &ArgMatches,
+) -> Result<Option<String>, CaptureError> {
+    let Some(section) = matches.get_one::<String>("section") else {
+        return Ok(None);
+    };
+    if section.trim().is_empty() {
+        return Err(CaptureError::usage("--section must not be empty"));
+    }
+    Ok(Some(section.clone()))
 }
 
 fn bob_dir_from_matches(matches: &ArgMatches) -> PathBuf {
@@ -204,8 +237,11 @@ fn raw_text_from_matches(matches: &ArgMatches) -> Result<String, CaptureError> {
 }
 
 fn capture(request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
-    let parsed =
-        parse_capture_text(&request.raw_text, request.forced_route.as_deref())?;
+    let parsed = parse_capture_text(
+        &request.raw_text,
+        request.forced_route.as_deref(),
+        request.forced_section.as_deref(),
+    )?;
     let created = current_date_string();
     let capture_line = match &parsed.kind {
         CaptureKind::Task => format_task_line(&parsed.body, &created),
@@ -293,10 +329,14 @@ fn capture_to_target(
     let contents = read_target(target)?;
     let (updated, placement) = match kind {
         CaptureKind::Task => insert_task_line(&contents, capture_line),
-        CaptureKind::Bullet { section_prefix } => insert_bullet_line(
+        CaptureKind::Bullet {
+            section_prefix,
+            exact,
+        } => insert_bullet_line(
             &contents,
             capture_line,
             section_prefix.as_deref(),
+            *exact,
         ),
     };
     if !dry_run {
@@ -332,7 +372,10 @@ fn fs_error(action: &str, path: &Path, error: io::Error) -> CaptureError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureKind {
     Task,
-    Bullet { section_prefix: Option<String> },
+    Bullet {
+        section_prefix: Option<String>,
+        exact: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +398,10 @@ struct RouteToken {
 impl RouteToken {
     fn into_parsed(self, body: String) -> ParsedCaptureText {
         let kind = match self.bullet {
-            Some(section_prefix) => CaptureKind::Bullet { section_prefix },
+            Some(section_prefix) => CaptureKind::Bullet {
+                section_prefix,
+                exact: false,
+            },
             None => CaptureKind::Task,
         };
         ParsedCaptureText {
@@ -369,6 +415,7 @@ impl RouteToken {
 fn parse_capture_text(
     raw_text: &str,
     forced_route: Option<&str>,
+    forced_section: Option<&str>,
 ) -> Result<ParsedCaptureText, CaptureError> {
     let normalized = normalize_task_text(raw_text);
     if normalized.is_empty() {
@@ -376,6 +423,25 @@ fn parse_capture_text(
     }
 
     let tokens: Vec<&str> = normalized.split(' ').collect();
+
+    if let Some(section) = forced_section {
+        let Some(route) = forced_route else {
+            return Err(CaptureError::usage("--section requires --route"));
+        };
+        if section.trim().is_empty() {
+            return Err(CaptureError::usage("--section must not be empty"));
+        }
+        let route = normalize_forced_route(route)?;
+        reject_legacy_bullet_markers(&tokens, false)?;
+        return Ok(ParsedCaptureText {
+            body: normalized,
+            route: Some(route),
+            kind: CaptureKind::Bullet {
+                section_prefix: Some(section.to_string()),
+                exact: true,
+            },
+        });
+    }
 
     if let Some(route) = forced_route {
         let route = normalize_forced_route(route)?;
@@ -579,10 +645,11 @@ fn insert_bullet_line(
     contents: &str,
     bullet_line: &str,
     section_prefix: Option<&str>,
+    exact: bool,
 ) -> (String, Placement) {
     let lines = line_spans(contents);
     let headings = markdown_headings(&lines);
-    let section = target_bullet_section(&lines, &headings, section_prefix);
+    let section = target_bullet_section(&lines, &headings, section_prefix, exact);
 
     if let Some(index) = last_bullet_block_insert_index_in_range(
         &lines,
@@ -636,10 +703,15 @@ fn target_bullet_section(
     lines: &[LineSpan<'_>],
     headings: &[MarkdownHeading<'_>],
     section_prefix: Option<&str>,
+    exact: bool,
 ) -> MarkdownSection {
     let matches = |heading: &MarkdownHeading<'_>| {
         heading.title != "Tasks"
-            && heading_matches_bullet_prefix(heading.title, section_prefix)
+            && heading_matches_bullet_selector(
+                heading.title,
+                section_prefix,
+                exact,
+            )
     };
     // Prefer the first matching non-H1 heading, falling back to the first
     // matching H1 heading only when no non-H1 heading matches.
@@ -686,19 +758,47 @@ fn target_bullet_section(
     }
 }
 
-/// Whether `title` matches a bullet capture's section prefix. A bare marker
-/// (no prefix) matches every heading; otherwise the prefix is compared against
-/// the start of `title` case insensitively.
-fn heading_matches_bullet_prefix(
+/// Whether `title` matches a bullet capture's section selector. A bare marker
+/// (no selector) matches every heading; otherwise exact selectors compare the
+/// whole title case insensitively, and prefix selectors compare against the
+/// start of `title` case insensitively.
+fn heading_matches_bullet_selector(
     title: &str,
     section_prefix: Option<&str>,
+    exact: bool,
 ) -> bool {
     match section_prefix {
         None => true,
-        Some(prefix) => {
-            title.to_lowercase().starts_with(&prefix.to_lowercase())
+        Some(selector) => {
+            let title = title.to_lowercase();
+            let selector = selector.to_lowercase();
+            if exact {
+                title == selector
+            } else {
+                title.starts_with(&selector)
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SectionHeading {
+    pub(crate) title: String,
+    pub(crate) level: usize,
+}
+
+pub(crate) fn non_tasks_section_headings(
+    contents: &str,
+) -> Vec<SectionHeading> {
+    let lines = line_spans(contents);
+    markdown_headings(&lines)
+        .into_iter()
+        .filter(|heading| heading.title != "Tasks")
+        .map(|heading| SectionHeading {
+            title: heading.title.to_string(),
+            level: heading.level,
+        })
+        .collect()
 }
 
 fn last_bullet_block_insert_index_in_range(
@@ -1100,6 +1200,21 @@ mod tests {
     const TASK: &str = "- [ ] #task new thing [created::2026-06-15]";
     const BULLET: &str = "- new idea [created::2026-06-15]";
 
+    fn parse_capture_text(
+        raw_text: &str,
+        forced_route: Option<&str>,
+    ) -> Result<ParsedCaptureText, CaptureError> {
+        super::parse_capture_text(raw_text, forced_route, None)
+    }
+
+    fn insert_bullet_line(
+        contents: &str,
+        bullet_line: &str,
+        section_prefix: Option<&str>,
+    ) -> (String, Placement) {
+        super::insert_bullet_line(contents, bullet_line, section_prefix, false)
+    }
+
     #[test]
     fn normalizes_whitespace() {
         assert_eq!(
@@ -1465,11 +1580,50 @@ mod tests {
             assert_eq!(
                 parsed.kind,
                 CaptureKind::Bullet {
-                    section_prefix: prefix.map(str::to_string)
+                    section_prefix: prefix.map(str::to_string),
+                    exact: false,
                 },
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn forced_section_forces_exact_bullet_with_forced_route() {
+        let parsed = super::parse_capture_text(
+            "Some note @other",
+            Some("Foo"),
+            Some("Ideas"),
+        )
+        .expect("parse forced section");
+        assert_eq!(parsed.body, "Some note @other");
+        assert_eq!(parsed.route.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.kind,
+            CaptureKind::Bullet {
+                section_prefix: Some("Ideas".to_string()),
+                exact: true,
+            }
+        );
+    }
+
+    #[test]
+    fn forced_section_requires_route_and_non_empty_title() {
+        let error = super::parse_capture_text("Some note", None, Some("Ideas"))
+            .expect_err("section without route must fail");
+        assert_eq!(error.kind, CaptureErrorKind::Usage);
+        assert!(
+            error.message.contains("requires --route"),
+            "unexpected error: {error:?}"
+        );
+
+        let error = super::parse_capture_text("Some note", Some("foo"), Some(""))
+            .expect_err("empty section must fail");
+        assert_eq!(error.kind, CaptureErrorKind::Usage);
+        assert!(
+            error.message.contains("must not be empty"),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -1683,6 +1837,96 @@ mod tests {
                 ),
                 Placement::Inserted,
             )
+        );
+    }
+
+    #[test]
+    fn exact_bullet_section_wins_over_prefix_sibling() {
+        let contents = "## Ideas\nnotes\n## Idea\nnotes\n";
+        assert_eq!(
+            super::insert_bullet_line(contents, BULLET, Some("Idea"), true),
+            (
+                format!("## Ideas\nnotes\n## Idea\n\n{BULLET}\nnotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn exact_bullet_section_keeps_non_h1_preference() {
+        let contents = "# Idea\nintro\n## Idea\nnotes\n";
+        assert_eq!(
+            super::insert_bullet_line(contents, BULLET, Some("Idea"), true),
+            (
+                format!("# Idea\nintro\n## Idea\n\n{BULLET}\nnotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn exact_bullet_section_matches_case_insensitively() {
+        let contents = "## Research\nnotes\n";
+        assert_eq!(
+            super::insert_bullet_line(contents, BULLET, Some("research"), true),
+            (
+                format!("## Research\n\n{BULLET}\nnotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn exact_bullet_section_no_match_falls_back_to_zeroth_section() {
+        let contents = "Intro\n## Ideas\nnotes\n";
+        assert_eq!(
+            super::insert_bullet_line(contents, BULLET, Some("Idea"), true),
+            (
+                format!("{BULLET}\nIntro\n## Ideas\nnotes\n"),
+                Placement::Inserted,
+            )
+        );
+    }
+
+    #[test]
+    fn bare_bullet_marker_ignores_exact_flag() {
+        let contents = "# Title\nintro\n\n## Notes\nbody\n";
+        assert_eq!(
+            super::insert_bullet_line(contents, BULLET, None, true),
+            insert_bullet_line(contents, BULLET, None)
+        );
+    }
+
+    #[test]
+    fn non_tasks_section_headings_match_bullet_heading_scan() {
+        let contents = concat!(
+            "---\n",
+            "## Frontmatter\n",
+            "---\n",
+            "# Title\n",
+            "```md\n",
+            "## Fenced\n",
+            "```\n",
+            "## Tasks\n",
+            "### Ideas ###\n",
+            "###### Log\n",
+        );
+        assert_eq!(
+            non_tasks_section_headings(contents),
+            vec![
+                SectionHeading {
+                    title: "Title".to_string(),
+                    level: 1,
+                },
+                SectionHeading {
+                    title: "Ideas".to_string(),
+                    level: 3,
+                },
+                SectionHeading {
+                    title: "Log".to_string(),
+                    level: 6,
+                },
+            ]
         );
     }
 }

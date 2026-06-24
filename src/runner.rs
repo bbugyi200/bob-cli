@@ -43,6 +43,12 @@ const SUBCOMMANDS: &[Subcommand] = &[
         native_command: NativeCommand::Capture,
     },
     Subcommand {
+        name: "capture-sections",
+        script_command: None,
+        about: "List the non-Tasks sections of a capture note",
+        native_command: NativeCommand::CaptureSections,
+    },
+    Subcommand {
         name: "capture-targets",
         script_command: None,
         about: "List capture routes for inbox, area, and active project notes",
@@ -240,6 +246,8 @@ Examples:
   bob bulk-git-commit             Commit and push Bob vault Git changes
   bob capture buy milk @groceries
                                  Capture a task into groceries.md
+  bob capture-sections --route cash --format json
+                                 List picker sections for one capture target
   bob capture-targets --format json
                                  List picker targets for task capture
   bob dataview --source '#project'

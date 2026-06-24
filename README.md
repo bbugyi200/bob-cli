@@ -91,8 +91,14 @@ after any YAML frontmatter for the zeroth section). The suffixed route token may
 lead or trail the body, so `@notes#Ideas jot idea` and `jot idea @notes#Ideas`
 both capture into `notes.md`. Standalone terminal `#...` markers, such as
 `note #Ideas @foo` or `note @foo #`, are no longer accepted and fail with a
-usage error. A `--route` target keeps `@tokens` literal and, because bullet
-markers must ride an `@route` token, never captures a bullet.
+usage error.
+
+A `--route` target keeps `@tokens` literal. Add `--section TITLE` with
+`--route` to force bullet mode and place the bullet in a non-`Tasks` heading
+whose title matches `TITLE` exactly, compared case insensitively. This exact
+section path is intended for picker integrations; typed `@route#prefix` tokens
+keep the prefix-matching behavior described above. Without `--section`,
+`--route` captures a task.
 
 Useful options:
 
@@ -100,6 +106,7 @@ Useful options:
 - `-d, --dry-run`: parse, format, and report without writing
 - `-f, --format human|json`: human confirmation or stable JSON for callers
 - `-r, --route NAME`: force `NAME.md` and keep any `@tokens` in the text literal
+- `-s, --section TITLE`: with `--route`, force a bullet into the exact section
 
 If `TEXT` is omitted and stdin is piped, `bob capture` reads one line from
 stdin. Put options before text, or use `--` when the task itself starts with a
