@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-24 07:52:49
-status: wip
+status: done
 prompt: sdd/prompts/202606/block_link_task_picker.md
 ---
 # Plan: Block‑link task picker (`^^` → pick an open task → complete the link)
