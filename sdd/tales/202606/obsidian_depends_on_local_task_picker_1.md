@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-28 09:48:00
-status: wip
+status: done
 prompt: sdd/prompts/202606/obsidian_depends_on_local_task_picker_1.md
 ---
 # Plan: `dependsOn` Property + `local_task_id` Value Type for the Ctrl+Shift+P Bullet Property Picker
