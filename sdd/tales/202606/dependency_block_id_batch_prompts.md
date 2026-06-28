@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-28 12:24:21
-status: wip
+status: done
 prompt: sdd/prompts/202606/dependency_block_id_batch_prompts.md
 ---
 # Plan: Sequential block-ID prompts for batch dependency selection
