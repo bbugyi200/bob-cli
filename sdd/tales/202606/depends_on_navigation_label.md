@@ -1,6 +1,6 @@
 ---
 create_time: 2026-06-28 10:58:30
-status: wip
+status: done
 prompt: sdd/prompts/202606/depends_on_navigation_label.md
 ---
 # Plan: Rename dependency navigation bullets to `DEPENDS ON`
